@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from trader.cli import UsageError, _build_parser, _parse_since, main
+from trader.cli import UsageError, _build_parser, _parse_params, _parse_since, main
 
 # ------------------------------------------------------------------- --since
 
@@ -125,3 +125,142 @@ def test_coverage_lists_stored_series(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path))
     assert main(["data", "coverage"]) == 0
     assert "Stock:211@1m" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------- backtest
+
+
+def _seed_5m_lake(root, uic=211, bars=60):
+    """A gently trending 5-minute Stock series, enough for a warmup plus trades."""
+    from datetime import timedelta
+
+    from trader.data.lake import BarLake, SeriesKey, bars_to_frame
+    from trader.saxo.charts import Bar
+
+    start = datetime(2024, 3, 1, 14, 30, tzinfo=UTC)
+    prices = [100.0 + (i % 20) - 10 for i in range(bars)]  # sawtooth: real crossovers
+    lake = BarLake(root)
+    lake.write(
+        SeriesKey("Stock", uic, 5),
+        bars_to_frame(
+            [
+                Bar(
+                    Time=start + timedelta(minutes=5 * i),
+                    open=p,
+                    high=p + 0.5,
+                    low=p - 0.5,
+                    close=p,
+                    volume=1_000.0,
+                )
+                for i, p in enumerate(prices)
+            ]
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("fast=10", ("fast", 10)),
+        ("stop=0.005", ("stop", 0.005)),
+        ("long_only=true", ("long_only", True)),
+        ("max_bars=none", ("max_bars", None)),
+        ("label=orb", ("label", "orb")),
+    ],
+)
+def test_parse_params_coerces_by_type(given, expected):
+    key, value = expected
+    assert _parse_params([given]) == {key: value}
+
+
+def test_parse_params_rejects_a_bare_token():
+    with pytest.raises(UsageError, match="KEY=VALUE"):
+        _parse_params(["justakey"])
+
+
+def test_backtest_takes_repeated_symbols_and_params():
+    args = _build_parser().parse_args(
+        [
+            "backtest",
+            "--symbol",
+            "AAPL:xnas",
+            "--symbol",
+            "MSFT:xnas",
+            "--strategy",
+            "ma_cross",
+            "--param",
+            "fast=5",
+            "--param",
+            "slow=20",
+        ]
+    )
+    assert args.symbol == ["AAPL:xnas", "MSFT:xnas"]
+    assert args.param == ["fast=5", "slow=20"]
+    assert args.horizon == "5m"
+    assert args.allocator == "equal-weight"
+
+
+def test_backtest_unknown_strategy_exits_two_and_lists_the_known_ones(capsys):
+    code = main(["backtest", "--symbol", "X", "--uic", "211", "--strategy", "nope"])
+    assert code == 2
+    assert "ma_cross" in capsys.readouterr().err
+
+
+def test_backtest_on_an_empty_lake_points_at_backfill(capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path))
+    code = main(
+        [
+            "backtest",
+            "--symbol",
+            "X",
+            "--uic",
+            "211",
+            "--asset-type",
+            "Stock",
+            "--strategy",
+            "ma_cross",
+            "--horizon",
+            "5m",
+        ]
+    )
+    assert code == 2
+    assert "trader data backfill" in capsys.readouterr().err
+
+
+def test_backtest_golden_run_prints_metrics_and_writes_a_report(capsys, monkeypatch, tmp_path):
+    _seed_5m_lake(tmp_path)
+    monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "report.json"
+
+    code = main(
+        [
+            "backtest",
+            "--symbol",
+            "X",
+            "--uic",
+            "211",
+            "--asset-type",
+            "Stock",
+            "--strategy",
+            "ma_cross",
+            "--horizon",
+            "5m",
+            "--param",
+            "fast=3",
+            "--param",
+            "slow=8",
+            "--fee-bps",
+            "1",
+            "--out",
+            str(out),
+        ]
+    )
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "Total return" in printed and "Sharpe" in printed
+
+    import json
+
+    report = json.loads(out.read_text())
+    assert report["config"]["labels"] == ["X"]
+    assert "metrics" in report and "equity" in report

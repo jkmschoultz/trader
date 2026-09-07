@@ -12,7 +12,9 @@
     trader data coverage              # what the lake holds
     trader data sessions SYMBOL       # inferred trading hours and real gaps
 
-The ``data`` subcommands need the optional data dependencies::
+    trader backtest --symbol SYMBOL --strategy NAME   # run a strategy over stored bars
+
+The ``data`` and ``backtest`` subcommands need the optional data dependencies::
 
     pip install -e ".[data]"
 """
@@ -67,6 +69,23 @@ def _require_data_extra():
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise UsageError(
             f"the data commands need the optional data dependencies ({exc}). "
+            'Install them with:  pip install -e ".[data]"'
+        ) from exc
+
+
+def _require_backtest_extra():
+    """Import the backtest engine and strategy registry, or explain the extra.
+
+    Both live on top of :mod:`trader.data` and share its ``[data]`` extra, so a
+    base install that cannot import one cannot import the other either.
+    """
+    try:
+        from trader import backtest, strategies  # noqa: PLC0415
+
+        return backtest, strategies
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise UsageError(
+            f"the backtest command needs the optional data dependencies ({exc}). "
             'Install them with:  pip install -e ".[data]"'
         ) from exc
 
@@ -395,6 +414,110 @@ async def _cmd_data_sessions(settings: Settings, args) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------- backtest
+
+
+async def _cmd_backtest(settings: Settings, args) -> int:
+    bars_mod, calendars, _, _, lake_mod = _require_data_extra()
+    backtest, strategies = _require_backtest_extra()
+    from trader.saxo.exchanges import get_exchange  # noqa: PLC0415
+
+    horizon = parse_horizon(args.horizon)
+    since = _parse_since(args.since)
+
+    try:
+        strategy = strategies.get_strategy(args.strategy)(**_parse_params(args.param))
+    except KeyError as exc:
+        raise UsageError(exc.args[0]) from exc
+    except (TypeError, ValueError) as exc:
+        raise UsageError(f"bad --param for strategy {args.strategy!r}: {exc}") from exc
+    try:
+        allocator = backtest.get_allocator(args.allocator)
+    except KeyError as exc:
+        raise UsageError(exc.args[0]) from exc
+
+    store = lake_mod.BarLake(settings.data_dir)
+    padded_uics = list(args.uic) + [None] * (len(args.symbol) - len(args.uic))
+    need_network = any(uic is None for uic in padded_uics)
+
+    panel: dict[str, object] = {}
+    instruments: dict[str, object] = {}
+
+    def _read(label: str, key) -> object:
+        frame = store.read(key)
+        if since is not None:
+            frame = bars_mod.clip(frame, start=since)
+        if frame.empty:
+            raise UsageError(
+                f"nothing stored for {key}. Run: "
+                f"trader data backfill {label} --horizon {args.horizon}"
+            )
+        return frame
+
+    async def _add(symbol: str, uic, client) -> None:
+        exchange_id = None
+        if uic is None:
+            instrument = await _resolve(client, symbol, args.asset_type)
+            label, uic, asset_type = instrument.symbol, instrument.uic, instrument.asset_type
+            exchange_id = instrument.exchange_id
+        else:
+            label, asset_type = symbol, (args.asset_type or "Stock")
+        key = lake_mod.SeriesKey(asset_type, int(uic), horizon)
+        frame = _read(label, key)
+        session = None
+        if client is not None and exchange_id:
+            try:
+                exchange = await get_exchange(client, exchange_id)
+                session = calendars.infer_regular_hours(frame, calendars.resolve_timezone(exchange))
+            except SaxoAPIError as exc:
+                print(f"warning: no session calendar for {label}: {exc}")
+        panel[label] = frame
+        instruments[label] = backtest.Instrument(key=key, session=session)
+
+    if need_network:
+        async with SaxoClient(settings) as client:
+            for symbol, uic in zip(args.symbol, padded_uics, strict=True):
+                await _add(symbol, uic, client)
+    else:
+        for symbol, uic in zip(args.symbol, padded_uics, strict=True):
+            await _add(symbol, uic, None)
+
+    result = backtest.run(
+        panel,
+        strategy,
+        horizon=horizon,
+        allocator=allocator,
+        cost_model=backtest.CostModel(
+            commission_bps=args.fee_bps,
+            half_spread_bps=args.spread_bps,
+            slippage_bps=args.slippage_bps,
+        ),
+        instruments=instruments,
+        starting_cash=args.starting_cash,
+        leverage_cap=args.leverage,
+    )
+
+    print()
+    print(result)
+
+    if not result.trades.empty:
+        worst = result.trades.nsmallest(min(3, len(result.trades)), "pnl")
+        print("\n  Worst trades:")
+        for _, trade in worst.iterrows():
+            print(
+                f"    {trade['label']:<12} "
+                f"{trade['entry_time']:%Y-%m-%d %H:%M} -> {trade['exit_time']:%Y-%m-%d %H:%M}  "
+                f"{trade['pnl']:>+12,.0f}  [{trade['exit_reason']}]"
+            )
+
+    if args.out:
+        import json  # noqa: PLC0415
+
+        args.out.write_text(json.dumps(result.to_dict(), indent=2, default=str), encoding="utf-8")
+        print(f"\nReport written to {args.out}")
+    return 0
+
+
 # ---------------------------------------------------------------------- helpers
 
 
@@ -432,6 +555,36 @@ def _parse_since(value: str | None) -> datetime | None:
             "a lookback like 90d or 2y, or 'all'"
         ) from exc
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _parse_params(items: list[str]) -> dict[str, object]:
+    """Turn ``["fast=10", "long_only=true"]`` into a kwargs dict.
+
+    Values are coerced None -> bool -> int -> float -> str, in that order, so
+    ``--param max_bars=none`` and ``--param stop=0.005`` both land as the right
+    Python type without the strategy having to parse strings.
+    """
+    params: dict[str, object] = {}
+    for item in items:
+        if "=" not in item:
+            raise UsageError(f"--param must be KEY=VALUE, got {item!r}")
+        key, _, raw = item.partition("=")
+        params[key.strip()] = _coerce(raw.strip())
+    return params
+
+
+def _coerce(text: str) -> object:
+    low = text.casefold()
+    if low in {"none", "null", ""}:
+        return None
+    if low in {"true", "false"}:
+        return low == "true"
+    for cast in (int, float):
+        try:
+            return cast(text)
+        except ValueError:
+            continue
+    return text
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -495,6 +648,48 @@ def _build_parser() -> argparse.ArgumentParser:
     sessions_p.add_argument("--horizon", default="1m")
     sessions_p.add_argument("--limit", type=int, default=10, help="gaps to list")
 
+    backtest_p = sub.add_parser("backtest", help="run a strategy over stored bars")
+    backtest_p.add_argument(
+        "--symbol",
+        action="append",
+        required=True,
+        metavar="SYMBOL",
+        help="instrument to trade; repeat for a basket",
+    )
+    backtest_p.add_argument(
+        "--uic",
+        action="append",
+        type=int,
+        default=[],
+        help="skip symbol resolution; pairs positionally with --symbol",
+    )
+    backtest_p.add_argument("--asset-type", help="asset type for every --symbol (default Stock)")
+    backtest_p.add_argument("--strategy", required=True, help="registered strategy name")
+    backtest_p.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="strategy parameter, e.g. --param fast=10; repeatable",
+    )
+    backtest_p.add_argument("--horizon", default="5m", help="bar size (default 5m)")
+    backtest_p.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
+    backtest_p.add_argument(
+        "--allocator",
+        default="equal-weight",
+        help="equal-weight | passthrough | fixed-fraction | vol-target",
+    )
+    backtest_p.add_argument("--starting-cash", type=float, default=100_000.0)
+    backtest_p.add_argument(
+        "--fee-bps", type=float, default=0.0, help="commission, basis points of notional"
+    )
+    backtest_p.add_argument(
+        "--spread-bps", type=float, default=0.0, help="half-spread when no ask is stored"
+    )
+    backtest_p.add_argument("--slippage-bps", type=float, default=0.0)
+    backtest_p.add_argument("--leverage", type=float, default=1.0, help="gross exposure cap")
+    backtest_p.add_argument("--out", type=_path, help="write a JSON report here")
+
     return parser
 
 
@@ -536,6 +731,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_data_coverage(settings, args)
             if args.data_command == "sessions":
                 return asyncio.run(_cmd_data_sessions(settings, args))
+        elif args.command == "backtest":
+            return asyncio.run(_cmd_backtest(settings, args))
     except ReauthRequired as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -4,7 +4,8 @@ An intraday trading system on the Saxo Bank OpenAPI: research and backtesting, p
 live trading, and a UI to drive all of it. The modelling centrepiece is a multi-timeframe LSTM
 classifier trained on triple-barrier labels.
 
-**Status: Phase 1 (data layer) complete.** See [the plan](#roadmap) for what comes next.
+**Status: Phase 2 (strategy interface + backtest engine) complete.** See [the plan](#roadmap)
+for what comes next.
 
 ## Setup
 
@@ -57,10 +58,19 @@ happens, `TRADER_SAXO__OAUTH_FLOW=pkce|secret` forces the choice.
 .venv/bin/trader data backfill AAPL:xnas --asset-type Stock --horizon 1m,5m --since 90d
 .venv/bin/trader data coverage                  # what the local Parquet lake holds
 .venv/bin/trader data sessions AAPL:xnas --asset-type Stock # inferred trading hours, real gaps
+
+.venv/bin/trader backtest --symbol AAPL:xnas --symbol MSFT:xnas --asset-type Stock \
+    --strategy ma_cross --horizon 5m --since 90d --param fast=10 --param slow=30 \
+    --allocator equal-weight --fee-bps 0.5 --out bt.json
+.venv/bin/trader backtest --symbol AAPL:xnas --asset-type Stock --strategy orb \
+    --horizon 5m --since 90d --param open_minutes=15 --param stop=0.005 --param take=0.01
 ```
 
-The `data` commands need the optional data dependencies: `pip install -e ".[data]"`. See
-[docs/history-depth.md](docs/history-depth.md) for what the depth spike found against SIM.
+The `data` and `backtest` commands need the optional data dependencies:
+`pip install -e ".[data]"`. See [docs/history-depth.md](docs/history-depth.md) for what the depth
+spike found against SIM, and [docs/backtest.md](docs/backtest.md) for the engine's timing model
+and cost assumptions. Pass `--uic` alongside `--symbol` to skip the network entirely and run
+straight from the lake.
 
 ### A note on token lifetimes
 
@@ -94,13 +104,13 @@ it, a test constructing `Settings()` would pick up live credentials.
 | `src/trader/features/` | Causal feature pipeline |
 | `src/trader/labels/` | Triple-barrier labelling |
 | `src/trader/models/` | Dataset windowing, LSTM, training, model registry |
-| `src/trader/strategies/` | `Strategy` ABC, registry, and implementations |
-| `src/trader/backtest/` | Event-driven engine, cost model, metrics |
+| `src/trader/strategies/` | `Strategy` ABC, registry, `ma_cross` and `orb` |
+| `src/trader/backtest/` | Event-driven engine, allocators, cost model, metrics |
 | `src/trader/execution/` | Broker abstraction: paper and live |
 | `src/trader/api/` | FastAPI service |
 | `frontend/` | React/Vite UI |
 
-`saxo/`, `data/`, and the config layer exist so far.
+`saxo/`, `data/`, `strategies/`, `backtest/`, and the config layer exist so far.
 
 ## Design notes
 
@@ -130,17 +140,24 @@ it lands, so an interrupted run loses at most the page in flight and a re-run pi
 is already stored, in both directions (topping up recent bars, and extending further into the
 past).
 
+**The backtest engine cannot look ahead.** A strategy decides on the bar that just closed and
+the fill lands at the next bar's open — a price knowable at that instant. Bracket exits are
+checked intrabar against `high`/`low`, and when one bar spans both the stop and the target the
+stop wins, which biases bracketed strategies down (the safe direction). Strategies emit a
+conviction in `[-1, 1]`; an `Allocator` turns the book's convictions into equity-fraction
+weights under a leverage cap. See [docs/backtest.md](docs/backtest.md).
+
 ## Roadmap
 
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Scaffold, OAuth2, rate-limited client | done, verified against sim |
 | 1 | Data layer, history-depth spike, session calendars | done, verified against sim |
-| 2 | Strategy interface + backtest engine | next |
-| 3 | Features, triple-barrier labels, LSTM | |
+| 2 | Strategy interface + backtest engine | done |
+| 3 | Features, triple-barrier labels, LSTM | next |
 | 4 | FastAPI + React UI | |
 | 5 | Paper trading | |
 | 6 | Live trading (gated) | |
 
 Classical algorithms (ORB, MA cross, RSI mean reversion, VWAP, Donchian) plug into the same
-`Strategy` interface and can be added any time after Phase 2.
+`Strategy` interface. `ma_cross` and `orb` ship now; the rest can be added any time.
