@@ -1,0 +1,22 @@
+# Non-secret configuration. Committed to git.
+# Secrets and machine-specific overrides belong in .env -- see .env.example.
+# Environment variables override everything here.
+
+# Local state and the market-data lake. Both are gitignored.
+state_dir = "state"
+data_dir = "data"
+
+# Hard gate on real-money orders. Must be true *and* saxo.environment must be
+# "live" before any order reaches the live gateway. Keep this false.
+allow_live_trading = false
+
+[saxo]
+environment = "sim"
+redirect_uri = "http://localhost:8765/callback"
+
+# Stay under Saxo's documented 120/min per service group so a burst during
+# history backfill never trips a 429.
+rate_limit_per_minute = 100
+
+# Refresh the access token after 75% of its ~20 minute life has elapsed.
+refresh_at_lifetime_fraction = 0.75
