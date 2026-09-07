@@ -150,3 +150,8 @@ def get_allocator(name: str, **kwargs: object) -> Allocator:
             f"unknown allocator {name!r}; choose one of {', '.join(sorted(_ALLOCATORS))}"
         ) from None
     return cls(**kwargs)  # type: ignore[arg-type]
+
+
+def available_allocators() -> dict[str, type[Allocator]]:
+    """Every registered allocator name -> class, for a catalogue. Sorted by name."""
+    return dict(sorted(_ALLOCATORS.items()))

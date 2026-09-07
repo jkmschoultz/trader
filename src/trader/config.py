@@ -55,6 +55,13 @@ class SaxoSettings(BaseModel):
     # 3600s (60 min). Refreshing early is what keeps a long session alive.
     refresh_at_lifetime_fraction: float = 0.75
 
+    # Exchange suffixes tried, in order, to break a tie when a bare ticker like
+    # "AAPL" matches the same company on several venues. Matched against the
+    # ``:xxxx`` suffix of the Saxo symbol; an explicit "AAPL:xmil" is never
+    # overridden. Consulted by the shared resolver in ``trader.service`` (the UI
+    # and ``trader backtest``), not by ``trader instruments``/``data``.
+    preferred_exchanges: list[str] = ["xnas", "xnys", "arcx", "xlon", "xetr"]
+
     @field_validator("redirect_uri")
     @classmethod
     def _must_be_loopback(cls, v: str) -> str:

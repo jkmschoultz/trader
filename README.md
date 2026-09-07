@@ -4,8 +4,8 @@ An intraday trading system on the Saxo Bank OpenAPI: research and backtesting, p
 live trading, and a UI to drive all of it. The modelling centrepiece is a multi-timeframe LSTM
 classifier trained on triple-barrier labels.
 
-**Status: Phase 2 (strategy interface + backtest engine) complete.** See [the plan](#roadmap)
-for what comes next.
+**Status: Phase 3 (FastAPI + React UI) in progress.** Phases 0-2 are complete and verified
+against sim. See [the plan](#roadmap) for what comes next.
 
 ## Setup
 
@@ -72,6 +72,26 @@ spike found against SIM, and [docs/backtest.md](docs/backtest.md) for the engine
 and cost assumptions. Pass `--uic` alongside `--symbol` to skip the network entirely and run
 straight from the lake.
 
+### The UI
+
+```bash
+pip install -e ".[ui]"        # data layer + FastAPI + uvicorn
+.venv/bin/trader serve        # API on http://127.0.0.1:8000
+
+cd frontend && npm install && npm run dev   # Vite dev server on :5173, proxies /api
+```
+
+Open the Vite URL in development. The **Data** tab browses the bar lake and charts a series
+(and can trigger a backfill); the **Backtest** tab runs a strategy over stored bars and shows
+the equity curve, metrics, and blotter. Long actions run as background jobs with streamed
+progress.
+
+For a single-process deployment, `npm run build` writes `frontend/dist/` and `trader serve`
+then serves the UI at `/` on the API port. Instrument search and backfills need a live Saxo
+session; when the token has lapsed the UI shows a **Sign in to Saxo** button that runs the
+same browser flow as `trader auth login` (local machine only). Everything else works off the
+lake alone. See [docs/ui.md](docs/ui.md) for the architecture.
+
 ### A note on token lifetimes
 
 Measured against SIM: access tokens last **20 minutes** and refresh tokens **60 minutes**, and
@@ -106,11 +126,13 @@ it, a test constructing `Settings()` would pick up live credentials.
 | `src/trader/models/` | Dataset windowing, LSTM, training, model registry |
 | `src/trader/strategies/` | `Strategy` ABC, registry, `ma_cross` and `orb` |
 | `src/trader/backtest/` | Event-driven engine, allocators, cost model, metrics |
+| `src/trader/service/` | Framework-agnostic orchestration shared by the CLI and the API |
+| `src/trader/api/` | FastAPI service: catalogue, lake, backtests, background jobs |
 | `src/trader/execution/` | Broker abstraction: paper and live |
-| `src/trader/api/` | FastAPI service |
-| `frontend/` | React/Vite UI |
+| `frontend/` | React/Vite/Tailwind UI |
 
-`saxo/`, `data/`, `strategies/`, `backtest/`, and the config layer exist so far.
+`saxo/`, `data/`, `strategies/`, `backtest/`, `service/`, `api/`, `frontend/`, and the config
+layer exist so far.
 
 ## Design notes
 
@@ -154,10 +176,17 @@ weights under a leverage cap. See [docs/backtest.md](docs/backtest.md).
 | 0 | Scaffold, OAuth2, rate-limited client | done, verified against sim |
 | 1 | Data layer, history-depth spike, session calendars | done, verified against sim |
 | 2 | Strategy interface + backtest engine | done |
-| 3 | Features, triple-barrier labels, LSTM | next |
-| 4 | FastAPI + React UI | |
+| 3 | FastAPI + React UI | in progress |
+| 4 | Features, triple-barrier labels, LSTM | |
 | 5 | Paper trading | |
 | 6 | Live trading (gated) | |
+
+The UI comes before the model on purpose: everything worth visualising early — the bar
+lake, session calendars, strategy signals, equity curves, trades, and backtest metrics —
+already exists after Phase 2, and having that in front of you makes the model work in
+Phase 4 easier to judge. The LSTM lands as another `Strategy`, so the UI's backtest and
+research views cover it for free; Phase 4 only adds API surface for training runs and the
+model registry.
 
 Classical algorithms (ORB, MA cross, RSI mean reversion, VWAP, Donchian) plug into the same
 `Strategy` interface. `ma_cross` and `orb` ship now; the rest can be added any time.

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -75,6 +76,7 @@ async def backfill(
     max_pages: int = 1000,
     count: int = MAX_COUNT,
     resume: bool = True,
+    on_page: Callable[[BackfillResult], None] | None = None,
 ) -> BackfillResult:
     """Fetch bars for ``key`` and merge them into ``lake``.
 
@@ -88,6 +90,9 @@ async def backfill(
         resume: extend existing coverage instead of refetching it. Turn this off
             to re-download a series whose stored bars are suspect -- writes
             deduplicate, so a full refetch repairs in place.
+
+        on_page: called with the running :class:`BackfillResult` after each page
+            is committed, for progress reporting. No effect on the outcome.
 
     Returns:
         A :class:`BackfillResult`. Its ``stopped_because`` is worth reading: a
@@ -110,6 +115,7 @@ async def backfill(
             max_bars=max_bars,
             max_pages=max_pages,
             count=count,
+            on_page=on_page,
         )
     else:
         log.info("%s: resuming from stored %s -> %s", key, coverage.first, coverage.last)
@@ -127,6 +133,7 @@ async def backfill(
                 max_bars=max_bars,
                 max_pages=max_pages,
                 count=count,
+                on_page=on_page,
             )
 
         # Backward: older than the oldest stored bar, towards `since`.
@@ -142,6 +149,7 @@ async def backfill(
                 max_bars=max_bars,
                 max_pages=max_pages,
                 count=count,
+                on_page=on_page,
             )
 
     result.elapsed_seconds = time.monotonic() - started
@@ -161,6 +169,7 @@ async def _walk(
     max_bars: int | None,
     max_pages: int,
     count: int,
+    on_page: Callable[[BackfillResult], None] | None = None,
 ) -> None:
     """Run one directional walk, committing each page to the lake as it lands."""
     walk = iter_history(
@@ -196,6 +205,9 @@ async def _walk(
             earliest,
             written.rows_added,
         )
+
+        if on_page is not None:
+            on_page(result)
 
         if max_bars is not None and fetched_here >= max_bars:
             result.stopped_because[direction] = "max-bars"

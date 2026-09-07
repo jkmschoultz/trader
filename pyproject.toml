@@ -30,6 +30,10 @@ api = [
     "uvicorn[standard]>=0.30",
     "websockets>=12.0",
 ]
+# Everything the API and its UI backend need: the data layer plus the web stack.
+ui = [
+    "trader[data,api]",
+]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
@@ -49,6 +53,11 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's dependency-injection idiom is `param: T = Depends(...)` in the
+# signature; B008 (no function calls in argument defaults) does not apply.
+"src/trader/api/routes/*" = ["B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

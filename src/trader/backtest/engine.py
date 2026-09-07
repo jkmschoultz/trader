@@ -22,7 +22,7 @@ import copy
 import logging
 import math
 from bisect import bisect_left
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -109,6 +109,7 @@ def run(
     leverage_cap: float = 1.0,
     warmup: int | None = None,
     rebalance_band: float = 0.25,
+    progress: Callable[[float], None] | None = None,
 ) -> BacktestResult:
     """Backtest ``strategy`` over ``panel`` and return a :class:`BacktestResult`.
 
@@ -132,6 +133,9 @@ def run(
         rebalance_band: leave a position alone unless the new target is at least
             this fraction away from it (or the sign changed). Stops equity- and
             price-drift from churning a constant conviction every bar.
+        progress: called with a fraction in ``(0, 1]`` as the event loop
+            advances, throttled to about fifty updates. For a UI or a long run;
+            no effect on the result.
     """
     return _Engine(
         panel,
@@ -140,6 +144,7 @@ def run(
         cost_model=cost_model,
         instruments=instruments,
         cfg=_EngineConfig(horizon, starting_cash, leverage_cap, warmup, rebalance_band),
+        progress=progress,
     ).run()
 
 
@@ -153,8 +158,10 @@ class _Engine:
         cost_model: CostModel | Mapping[str, CostModel] | None,
         instruments: Mapping[str, Instrument] | None,
         cfg: _EngineConfig,
+        progress: Callable[[float], None] | None = None,
     ) -> None:
         self.cfg = cfg
+        self._progress = progress
         self.labels = list(panel)
         if not self.labels:
             raise ValueError("panel is empty")
@@ -238,7 +245,9 @@ class _Engine:
     # ------------------------------------------------------------- main loop
 
     def run(self) -> BacktestResult:
-        for event in self.events:
+        total = len(self.events)
+        tick = max(1, total // 50)
+        for i, event in enumerate(self.events):
             active = self._active_labels(event)
             for label, row in active:
                 self._bracket_exits(label, row, event)
@@ -250,6 +259,9 @@ class _Engine:
             self.equity_points.append((event, equity))
             if any(self.pos[label].units for label in self.labels):
                 self.exposure_hits += 1
+
+            if self._progress is not None and (i % tick == 0 or i == total - 1):
+                self._progress((i + 1) / total)
 
         self._flatten_all(self.events[-1])
         return self._result()

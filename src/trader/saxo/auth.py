@@ -27,6 +27,7 @@ import secrets
 import threading
 import urllib.parse
 import webbrowser
+from collections.abc import Callable
 from enum import StrEnum
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -268,8 +269,20 @@ class SaxoAuth:
 
     # --- Interactive login -------------------------------------------------
 
-    async def login_interactive(self, *, open_browser: bool = True) -> TokenSet:
-        """Run the browser authorization-code flow and store the result."""
+    async def login_interactive(
+        self,
+        *,
+        open_browser: bool = True,
+        on_auth_url: Callable[[str], None] | None = None,
+    ) -> TokenSet:
+        """Run the browser authorization-code flow and store the result.
+
+        Args:
+            open_browser: open the system browser at the authorize URL.
+            on_auth_url: called with the authorize URL once it is built, before
+                the wait for the callback begins -- for a caller that wants to
+                show or log the link (the UI's sign-in flow).
+        """
         if not self._settings.saxo.app_key:
             raise AuthError(
                 "TRADER_SAXO__APP_KEY is not set. Copy .env.example to .env and fill "
@@ -293,6 +306,8 @@ class SaxoAuth:
         if self.flow is OAuthFlow.PKCE:
             params |= {"code_challenge": challenge, "code_challenge_method": "S256"}
         auth_url = f"{self._hosts.authorize}?{urllib.parse.urlencode(params)}"
+        if on_auth_url is not None:
+            on_auth_url(auth_url)
 
         code = await asyncio.to_thread(self._await_callback, auth_url, port, state, open_browser)
 

@@ -9,6 +9,7 @@ themselves.
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -33,3 +34,34 @@ def isolated_settings(monkeypatch, tmp_path):
     monkeypatch.setattr(trader.config, "_cached", None)
     yield
     get_settings(reload=True)
+
+
+def _seed_5m_lake(root, *, uic: int = 211, asset_type: str = "Stock", bars: int = 80) -> None:
+    """A gently sawtoothing 5-minute series, enough for a warmup plus real trades."""
+    from trader.data.lake import BarLake, SeriesKey, bars_to_frame
+    from trader.saxo.charts import Bar
+
+    start = datetime(2024, 3, 1, 14, 30, tzinfo=UTC)
+    prices = [100.0 + (i % 20) - 10 for i in range(bars)]
+    BarLake(root).write(
+        SeriesKey(asset_type, uic, 5),
+        bars_to_frame(
+            [
+                Bar(
+                    Time=start + timedelta(minutes=5 * i),
+                    open=p,
+                    high=p + 0.5,
+                    low=p - 0.5,
+                    close=p,
+                    volume=1_000.0,
+                )
+                for i, p in enumerate(prices)
+            ]
+        ),
+    )
+
+
+@pytest.fixture
+def seed_5m_lake():
+    """Call ``seed_5m_lake(root, uic=..., bars=...)`` to write a series into a lake."""
+    return _seed_5m_lake

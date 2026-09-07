@@ -19,6 +19,7 @@ from trader.backtest.allocator import (
     FixedFraction,
     PassThrough,
     VolTarget,
+    available_allocators,
     get_allocator,
 )
 from trader.backtest.costs import CostModel
@@ -37,6 +38,7 @@ __all__ = [
     "Metrics",
     "PassThrough",
     "VolTarget",
+    "available_allocators",
     "compute",
     "get_allocator",
     "periods_per_year",

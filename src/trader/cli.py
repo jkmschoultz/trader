@@ -14,9 +14,10 @@
 
     trader backtest --symbol SYMBOL --strategy NAME   # run a strategy over stored bars
 
-The ``data`` and ``backtest`` subcommands need the optional data dependencies::
+    trader serve                      # run the API + UI (needs the [api] extra)
 
-    pip install -e ".[data]"
+The ``data`` and ``backtest`` subcommands need the optional data dependencies
+(``pip install -e ".[data]"``); ``serve`` also needs ``[api]``.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from trader.config import Settings, get_settings
 from trader.saxo.accounts import get_balance, get_user, list_accounts
@@ -418,84 +419,35 @@ async def _cmd_data_sessions(settings: Settings, args) -> int:
 
 
 async def _cmd_backtest(settings: Settings, args) -> int:
-    bars_mod, calendars, _, _, lake_mod = _require_data_extra()
-    backtest, strategies = _require_backtest_extra()
-    from trader.saxo.exchanges import get_exchange  # noqa: PLC0415
+    _require_backtest_extra()
+    from pydantic import ValidationError  # noqa: PLC0415
 
-    horizon = parse_horizon(args.horizon)
-    since = _parse_since(args.since)
+    from trader.service.backtest import BacktestSpec, run_backtest  # noqa: PLC0415
+    from trader.service.errors import ServiceError  # noqa: PLC0415
 
     try:
-        strategy = strategies.get_strategy(args.strategy)(**_parse_params(args.param))
-    except KeyError as exc:
-        raise UsageError(exc.args[0]) from exc
-    except (TypeError, ValueError) as exc:
-        raise UsageError(f"bad --param for strategy {args.strategy!r}: {exc}") from exc
-    try:
-        allocator = backtest.get_allocator(args.allocator)
-    except KeyError as exc:
-        raise UsageError(exc.args[0]) from exc
-
-    store = lake_mod.BarLake(settings.data_dir)
-    padded_uics = list(args.uic) + [None] * (len(args.symbol) - len(args.uic))
-    need_network = any(uic is None for uic in padded_uics)
-
-    panel: dict[str, object] = {}
-    instruments: dict[str, object] = {}
-
-    def _read(label: str, key) -> object:
-        frame = store.read(key)
-        if since is not None:
-            frame = bars_mod.clip(frame, start=since)
-        if frame.empty:
-            raise UsageError(
-                f"nothing stored for {key}. Run: "
-                f"trader data backfill {label} --horizon {args.horizon}"
-            )
-        return frame
-
-    async def _add(symbol: str, uic, client) -> None:
-        exchange_id = None
-        if uic is None:
-            instrument = await _resolve(client, symbol, args.asset_type)
-            label, uic, asset_type = instrument.symbol, instrument.uic, instrument.asset_type
-            exchange_id = instrument.exchange_id
-        else:
-            label, asset_type = symbol, (args.asset_type or "Stock")
-        key = lake_mod.SeriesKey(asset_type, int(uic), horizon)
-        frame = _read(label, key)
-        session = None
-        if client is not None and exchange_id:
-            try:
-                exchange = await get_exchange(client, exchange_id)
-                session = calendars.infer_regular_hours(frame, calendars.resolve_timezone(exchange))
-            except SaxoAPIError as exc:
-                print(f"warning: no session calendar for {label}: {exc}")
-        panel[label] = frame
-        instruments[label] = backtest.Instrument(key=key, session=session)
-
-    if need_network:
-        async with SaxoClient(settings) as client:
-            for symbol, uic in zip(args.symbol, padded_uics, strict=True):
-                await _add(symbol, uic, client)
-    else:
-        for symbol, uic in zip(args.symbol, padded_uics, strict=True):
-            await _add(symbol, uic, None)
-
-    result = backtest.run(
-        panel,
-        strategy,
-        horizon=horizon,
-        allocator=allocator,
-        cost_model=backtest.CostModel(
-            commission_bps=args.fee_bps,
-            half_spread_bps=args.spread_bps,
+        spec = BacktestSpec(
+            symbols=args.symbol,
+            uics=args.uic,
+            asset_type=args.asset_type,
+            strategy=args.strategy,
+            params=_parse_params(args.param),
+            horizon=args.horizon,
+            since=args.since,
+            allocator=args.allocator,
+            fee_bps=args.fee_bps,
+            spread_bps=args.spread_bps,
             slippage_bps=args.slippage_bps,
-        ),
-        instruments=instruments,
-        starting_cash=args.starting_cash,
-        leverage_cap=args.leverage,
-    )
+            starting_cash=args.starting_cash,
+            leverage=args.leverage,
+        )
+    except ValidationError as exc:
+        raise UsageError(_first_error(exc)) from exc
+
+    try:
+        result = await run_backtest(settings, spec)
+    except ServiceError as exc:
+        raise UsageError(str(exc)) from exc
 
     print()
     print(result)
@@ -518,6 +470,26 @@ async def _cmd_backtest(settings: Settings, args) -> int:
     return 0
 
 
+# -------------------------------------------------------------------------- serve
+
+
+def _cmd_serve(settings: Settings, args) -> int:
+    try:
+        from trader.api.serve import run  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise UsageError(
+            f"the serve command needs the API dependencies ({exc}). "
+            'Install them with:  pip install -e ".[data,api]"'
+        ) from exc
+
+    print(
+        f"trader API on http://{args.host}:{args.port}  (environment: "
+        f"{settings.saxo.environment.value})"
+    )
+    run(host=args.host, port=args.port, reload=args.reload)
+    return 0
+
+
 # ---------------------------------------------------------------------- helpers
 
 
@@ -537,54 +509,32 @@ async def _resolve(client: SaxoClient, symbol: str, asset_type: str | None) -> I
 
 def _parse_since(value: str | None) -> datetime | None:
     """Parse ``--since`` as a date, a timestamp, or a lookback like ``90d``."""
-    if not value:
-        return None
-    text = value.strip()
-    if text.casefold() in {"all", "max"}:
-        return None
-    if text[-1:].casefold() in {"d", "y"} and text[:-1].replace(".", "", 1).isdigit():
-        days = float(text[:-1]) * (365.25 if text[-1:].casefold() == "y" else 1)
-        return datetime.now(UTC) - timedelta(days=days)
-    try:
-        from dateutil.parser import isoparse  # noqa: PLC0415
+    from trader.service.inputs import parse_since  # noqa: PLC0415
 
-        parsed = isoparse(text)
-    except (ImportError, ValueError) as exc:
-        raise UsageError(
-            f"cannot read --since {value!r}; use YYYY-MM-DD, an ISO timestamp, "
-            "a lookback like 90d or 2y, or 'all'"
-        ) from exc
-    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+    try:
+        return parse_since(value)
+    except ValueError as exc:
+        raise UsageError(f"--since: {exc}") from exc
 
 
 def _parse_params(items: list[str]) -> dict[str, object]:
-    """Turn ``["fast=10", "long_only=true"]`` into a kwargs dict.
+    """Turn ``["fast=10", "long_only=true"]`` into a coerced kwargs dict."""
+    from trader.service.inputs import parse_params  # noqa: PLC0415
 
-    Values are coerced None -> bool -> int -> float -> str, in that order, so
-    ``--param max_bars=none`` and ``--param stop=0.005`` both land as the right
-    Python type without the strategy having to parse strings.
-    """
-    params: dict[str, object] = {}
-    for item in items:
-        if "=" not in item:
-            raise UsageError(f"--param must be KEY=VALUE, got {item!r}")
-        key, _, raw = item.partition("=")
-        params[key.strip()] = _coerce(raw.strip())
-    return params
+    try:
+        return parse_params(items)
+    except ValueError as exc:
+        raise UsageError(f"--param must be KEY=VALUE ({exc})") from exc
 
 
-def _coerce(text: str) -> object:
-    low = text.casefold()
-    if low in {"none", "null", ""}:
-        return None
-    if low in {"true", "false"}:
-        return low == "true"
-    for cast in (int, float):
-        try:
-            return cast(text)
-        except ValueError:
-            continue
-    return text
+def _first_error(exc: Exception) -> str:
+    """The first line of a pydantic ``ValidationError``, for a one-line usage message."""
+    try:
+        first = exc.errors()[0]  # type: ignore[attr-defined]
+        loc = ".".join(str(p) for p in first.get("loc", ())) or "input"
+        return f"{loc}: {first.get('msg', exc)}"
+    except (AttributeError, IndexError, KeyError):
+        return str(exc)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -690,6 +640,11 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest_p.add_argument("--leverage", type=float, default=1.0, help="gross exposure cap")
     backtest_p.add_argument("--out", type=_path, help="write a JSON report here")
 
+    serve_p = sub.add_parser("serve", help="run the API and, if built, the UI")
+    serve_p.add_argument("--host", default="127.0.0.1")
+    serve_p.add_argument("--port", type=int, default=8000)
+    serve_p.add_argument("--reload", action="store_true", help="auto-reload on code changes")
+
     return parser
 
 
@@ -733,6 +688,8 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_cmd_data_sessions(settings, args))
         elif args.command == "backtest":
             return asyncio.run(_cmd_backtest(settings, args))
+        elif args.command == "serve":
+            return _cmd_serve(settings, args)
     except ReauthRequired as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
