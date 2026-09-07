@@ -9,6 +9,15 @@ cap is faster in practice than being throttled.
 The bucket is per service group -- the first path segment of an OpenAPI URL
 (``port``, ``chart``, ``trade``, ``ref``) -- because that is the dimension Saxo
 actually meters.
+
+This limiter's memory is per process. It correctly keeps one long-running
+process (a live trading session, one backfill run) under the configured rate,
+but has no way to know about quota another process already spent against the
+same Saxo session in the last minute -- confirmed while building Phase 1, where
+running several short-lived scripts against SIM back to back still produced a
+429 despite each one individually staying under its own limit. When that
+happens the client must still recover correctly rather than stall; see
+``SaxoClient._retry_after``.
 """
 
 from __future__ import annotations

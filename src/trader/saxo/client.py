@@ -182,14 +182,52 @@ class SaxoClient:
 
     @staticmethod
     def _retry_after(response: httpx.Response) -> float:
-        """Seconds to wait, from Saxo's rate-limit headers or a default."""
+        """Seconds to wait, from Saxo's rate-limit headers or a default.
+
+        A 429 carries one ``X-RateLimit-<Bucket>-Reset`` triplet *per quota
+        Saxo tracks* -- confirmed against SIM, where a request that merely
+        exhausted the per-minute chart quota still carried an unrelated
+        ``AppDay`` quota alongside it:
+
+            x-ratelimit-chartminute-remaining: 0        <- this is the one that fired
+            x-ratelimit-chartminute-reset: 50
+            x-ratelimit-appday-remaining: 9999521        <- nowhere near exhausted
+            x-ratelimit-appday-reset: 83016               <- but its reset is ~23h away
+
+        Iterating headers and returning the first ``-reset`` found (the previous
+        approach) picks whichever bucket the dict happens to yield first, which
+        is not necessarily the one that actually triggered the 429 -- taking the
+        wrong one here previously paused this client for most of a day when 50
+        seconds was correct. The fix: only consider buckets reporting
+        ``remaining <= 0`` -- those are the ones actually exhausted -- and take
+        the soonest reset among them.
+        """
+        remaining: dict[str, float] = {}
+        reset: dict[str, float] = {}
         for name, value in response.headers.items():
             lowered = name.lower()
-            if lowered.startswith("x-ratelimit-") and lowered.endswith("-reset"):
-                try:
-                    return max(1.0, float(value))
-                except ValueError:
-                    continue
+            if not lowered.startswith("x-ratelimit-"):
+                continue
+            bucket, _, kind = lowered.removeprefix("x-ratelimit-").rpartition("-")
+            try:
+                parsed = float(value)
+            except ValueError:
+                continue
+            if kind == "remaining":
+                remaining[bucket] = parsed
+            elif kind == "reset":
+                reset[bucket] = parsed
+
+        exhausted_resets = [reset[b] for b, left in remaining.items() if left <= 0 and b in reset]
+        if exhausted_resets:
+            return max(1.0, min(exhausted_resets))
+        # No bucket explicitly reports itself exhausted (e.g. Saxo omitted
+        # -remaining); fall back to the soonest reset of any bucket reported,
+        # which is the least likely of the available numbers to be a long,
+        # unrelated quota.
+        if reset:
+            return max(1.0, min(reset.values()))
+
         retry_after = response.headers.get("Retry-After")
         if retry_after:
             try:

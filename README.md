@@ -4,7 +4,7 @@ An intraday trading system on the Saxo Bank OpenAPI: research and backtesting, p
 live trading, and a UI to drive all of it. The modelling centrepiece is a multi-timeframe LSTM
 classifier trained on triple-barrier labels.
 
-**Status: Phase 0 (authentication) complete.** See [the plan](#roadmap) for what comes next.
+**Status: Phase 1 (data layer) complete.** See [the plan](#roadmap) for what comes next.
 
 ## Setup
 
@@ -50,7 +50,17 @@ happens, `TRADER_SAXO__OAUTH_FLOW=pkce|secret` forces the choice.
 .venv/bin/trader auth status    # what is stored and how long it has left
 .venv/bin/trader auth logout    # discard stored tokens
 .venv/bin/trader account        # user, accounts, and balances -- proves the connection works
+
+.venv/bin/trader instruments search AAPL        # find a Uic by ticker
+.venv/bin/trader exchange NASDAQ                # is it open, and its published sessions
+.venv/bin/trader data depth AAPL:xnas --asset-type Stock    # how far back Saxo actually serves bars
+.venv/bin/trader data backfill AAPL:xnas --asset-type Stock --horizon 1m,5m --since 90d
+.venv/bin/trader data coverage                  # what the local Parquet lake holds
+.venv/bin/trader data sessions AAPL:xnas --asset-type Stock # inferred trading hours, real gaps
 ```
+
+The `data` commands need the optional data dependencies: `pip install -e ".[data]"`. See
+[docs/history-depth.md](docs/history-depth.md) for what the depth spike found against SIM.
 
 ### A note on token lifetimes
 
@@ -90,7 +100,7 @@ it, a test constructing `Settings()` would pick up live credentials.
 | `src/trader/api/` | FastAPI service |
 | `frontend/` | React/Vite UI |
 
-Only `saxo/` and the config layer exist so far.
+`saxo/`, `data/`, and the config layer exist so far.
 
 ## Design notes
 
@@ -104,15 +114,29 @@ it could double the position. Writes reconcile instead.
 
 **Rate limits are enforced client-side.** Saxo allows 120 requests/minute per service group and
 1 order/second. Staying just under those caps is faster in practice than being throttled,
-particularly during history backfill.
+particularly during history backfill. The limiter's memory is per process, not global -- see
+[docs/history-depth.md](docs/history-depth.md) for what that means running several short scripts
+back to back, and how a 429 is now recovered from correctly regardless of the cause.
+
+**`FirstSampleTime` is not trustworthy.** Saxo's chart response claims to say how far back an
+instrument's history goes; measured against SIM, it reported the same fixed value across every
+intraday horizon regardless of where the data actually ran out (six and a half years off, for
+1-hour bars on AAPL). `trader.data.depth` measures depth empirically instead of trusting the
+field. See [docs/history-depth.md](docs/history-depth.md).
+
+**The bar lake is idempotent and resumable by design.** `BarLake.write` merges on bar timestamp,
+so replaying a backfill costs time and nothing else. `trader data backfill` commits every page as
+it lands, so an interrupted run loses at most the page in flight and a re-run picks up from what
+is already stored, in both directions (topping up recent bars, and extending further into the
+past).
 
 ## Roadmap
 
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Scaffold, OAuth2, rate-limited client | done, verified against sim |
-| 1 | Data layer, history-depth spike, session calendars | next |
-| 2 | Strategy interface + backtest engine | |
+| 1 | Data layer, history-depth spike, session calendars | done, verified against sim |
+| 2 | Strategy interface + backtest engine | next |
 | 3 | Features, triple-barrier labels, LSTM | |
 | 4 | FastAPI + React UI | |
 | 5 | Paper trading | |

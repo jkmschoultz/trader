@@ -131,6 +131,75 @@ async def test_rate_limit_is_retried_using_the_reset_header():
     assert attempts == 2
 
 
+async def test_retry_after_picks_the_bucket_that_actually_ran_out():
+    """Verified against SIM: a 429 from bursting the per-minute chart quota still
+    carries an unrelated AppDay quota header alongside it, with its own -Reset
+    that is nowhere near exhausted but numerically enormous by comparison
+    (~23h vs ~1min). Picking the first -Reset header seen, rather than the one
+    whose own -Remaining is actually 0, previously stalled the client for most
+    of a day on a routine per-minute throttle."""
+    response = httpx.Response(
+        429,
+        headers={
+            "X-RateLimit-AppDay-Limit": "10000000",
+            "X-RateLimit-AppDay-Remaining": "9999521",
+            "X-RateLimit-AppDay-Reset": "83016",
+            "X-RateLimit-ChartMinute-Limit": "120",
+            "X-RateLimit-ChartMinute-Remaining": "0",
+            "X-RateLimit-ChartMinute-Reset": "50",
+        },
+    )
+    assert SaxoClient._retry_after(response) == 50.0
+
+
+async def test_retry_after_falls_back_to_the_soonest_reset_without_remaining_counts():
+    response = httpx.Response(
+        429,
+        headers={"X-RateLimit-AppDay-Reset": "83016", "X-RateLimit-ChartMinute-Reset": "50"},
+    )
+    assert SaxoClient._retry_after(response) == 50.0
+
+
+async def test_a_burst_that_only_exhausts_the_minute_quota_does_not_stall(monkeypatch):
+    """End-to-end: the same header shape as the real SIM 429 must not turn into
+    a long sleep. TokenBucket.pause_for is monkeypatched to record what it was
+    told rather than actually sleeping, since asyncio.sleep(50) has no place in
+    a unit test."""
+    from trader.saxo.ratelimit import TokenBucket
+
+    paused_for: list[float] = []
+    original = TokenBucket.pause_for
+
+    def spy(self, seconds):
+        paused_for.append(seconds)
+        original(self, seconds)
+
+    monkeypatch.setattr(TokenBucket, "pause_for", spy)
+
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                429,
+                headers={
+                    "X-RateLimit-AppDay-Remaining": "9999521",
+                    "X-RateLimit-AppDay-Reset": "83016",
+                    "X-RateLimit-ChartMinute-Remaining": "0",
+                    "X-RateLimit-ChartMinute-Reset": "1",
+                },
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    client, _ = _client(handler)
+    async with client:
+        assert await client.get("/chart/v1/charts") == {"ok": True}
+
+    assert paused_for == [1.0], "must pause for the exhausted minute bucket, not the day bucket"
+
+
 async def test_unauthorized_triggers_one_forced_refresh():
     attempts = 0
 
