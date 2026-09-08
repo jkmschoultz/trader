@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 
 import { ASSET_TYPES, DEFAULT_ASSET_TYPE } from "../assetTypes";
 import { DEFAULT_EXCHANGE, EXCHANGES } from "../exchanges";
-import { useAllocators, useStrategies } from "../hooks";
+import { useAllocators, useModels, useStrategies } from "../hooks";
 import type { BacktestSpec, ParamInfo } from "../api/types";
 
 const field = "rounded border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700";
@@ -26,6 +26,7 @@ export function StrategyForm({
 }) {
   const strategies = useStrategies();
   const allocators = useAllocators();
+  const models = useModels();
 
   const [symbols, setSymbols] = useState("AAPL");
   const [exchange, setExchange] = useState(DEFAULT_EXCHANGE);
@@ -164,19 +165,38 @@ export function StrategyForm({
         <fieldset className="rounded border border-slate-200 p-3 dark:border-slate-800">
           <legend className="px-1 text-xs text-slate-500">{current.name} parameters</legend>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            {current.params.map((p) => (
-              <div key={p.name}>
-                <label className={label}>
-                  {p.name} <span className="text-slate-400">{p.type}</span>
-                </label>
-                <input
-                  className={`${field} w-full`}
-                  placeholder={p.default == null ? "" : String(p.default)}
-                  value={params[p.name] ?? ""}
-                  onChange={(e) => setParams((prev) => ({ ...prev, [p.name]: e.target.value }))}
-                />
-              </div>
-            ))}
+            {current.params
+              .filter((p) => p.name !== "models_dir")
+              .map((p) => (
+                <div key={p.name}>
+                  <label className={label}>
+                    {p.name} <span className="text-slate-400">{p.type}</span>
+                  </label>
+                  {strategy === "lstm" && p.name === "model" ? (
+                    <select
+                      className={`${field} w-full`}
+                      value={params[p.name] ?? ""}
+                      onChange={(e) => setParams((prev) => ({ ...prev, [p.name]: e.target.value }))}
+                    >
+                      <option value="">
+                        {models.data?.length ? "select a model…" : "no models trained yet"}
+                      </option>
+                      {models.data?.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.id}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      className={`${field} w-full`}
+                      placeholder={p.default == null ? "" : String(p.default)}
+                      value={params[p.name] ?? ""}
+                      onChange={(e) => setParams((prev) => ({ ...prev, [p.name]: e.target.value }))}
+                    />
+                  )}
+                </div>
+              ))}
           </div>
         </fieldset>
       )}

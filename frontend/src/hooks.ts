@@ -16,6 +16,14 @@ export function useAllocators() {
   return useQuery({ queryKey: ["allocators"], queryFn: api.allocators, staleTime: Infinity });
 }
 
+export function useFeatureSets() {
+  return useQuery({ queryKey: ["feature-sets"], queryFn: api.featureSets, staleTime: Infinity });
+}
+
+export function useModels() {
+  return useQuery({ queryKey: ["models"], queryFn: api.models });
+}
+
 export function useSeries() {
   return useQuery({ queryKey: ["series"], queryFn: api.series });
 }

@@ -3,12 +3,14 @@ import { useState } from "react";
 import { AuthBanner } from "./components/AuthBanner";
 import { DataView } from "./routes/DataView";
 import { BacktestView } from "./routes/BacktestView";
+import { TrainView } from "./routes/TrainView";
 
-type Tab = "data" | "backtest";
+type Tab = "data" | "backtest" | "train";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "data", label: "Data" },
   { id: "backtest", label: "Backtest" },
+  { id: "train", label: "Train" },
 ];
 
 export default function App() {
@@ -37,7 +39,9 @@ export default function App() {
       </header>
 
       <main className="p-4">
-        {tab === "data" ? <DataView /> : <BacktestView />}
+        {tab === "data" && <DataView />}
+        {tab === "backtest" && <BacktestView />}
+        {tab === "train" && <TrainView />}
       </main>
     </div>
   );

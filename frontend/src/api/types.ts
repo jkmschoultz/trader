@@ -175,3 +175,100 @@ export interface BacktestResult {
   fills: Fill[];
   n_fills: number;
 }
+
+// ---- model layer (src/trader/features, src/trader/models, src/trader/service/training) ----
+
+export interface FeatureSetInfo {
+  name: string;
+  summary: string;
+  columns: string[];
+  context_capable: boolean;
+}
+
+export interface TrainingSpec {
+  symbols: string[];
+  uics?: number[];
+  asset_type?: string | null;
+  exchange?: string | null;
+  name?: string;
+  horizon?: number | string;
+  context_horizons?: (number | string)[];
+  feature_set?: string;
+  stop?: number | null;
+  take?: number | null;
+  max_bars?: number;
+  min_return?: number;
+  window?: number;
+  train_end: string;
+  val_end: string;
+  embargo_bars?: number | null;
+  since?: string | null;
+  hidden?: number;
+  layers?: number;
+  dropout?: number;
+  bidirectional?: boolean;
+  epochs?: number;
+  batch_size?: number;
+  lr?: number;
+  use_sample_weights?: boolean;
+  seed?: number;
+}
+
+export interface ModelSummary {
+  id: string;
+  name: string;
+  created_at: string;
+  horizon: number;
+  context_horizons: number[];
+  feature_set: string;
+  window: number;
+  barriers: Record<string, number | null>;
+  metrics: Record<string, number>;
+  symbols: string[];
+}
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+  created_at: string;
+  base_horizon: number;
+  context_horizons: number[];
+  feature_set: string;
+  feature_digest: string;
+  window: number;
+  barriers: Record<string, number | null>;
+  split: Record<string, unknown>;
+  hyperparameters: Record<string, unknown>;
+  metrics: Record<string, number>;
+  class_distribution: Record<string, Record<string, number>>;
+  symbols: string[];
+  asset_type: string | null;
+}
+
+export interface TrainReport {
+  epochs: {
+    epoch: number;
+    train_loss: number;
+    val_loss: number;
+    val_acc: number;
+    val_macro_f1: number;
+  }[];
+  best_epoch: number;
+  val_confusion: number[][];
+  test_confusion: number[][] | null;
+  class_distribution: Record<string, Record<string, number>>;
+  metrics: Record<string, number>;
+  n_features: number;
+  n_train: number;
+  n_val: number;
+  n_test: number;
+  elapsed_seconds: number;
+  torch_version: string;
+}
+
+export interface TrainingResult {
+  model_id: string;
+  metrics: Record<string, number>;
+  class_distribution: Record<string, Record<string, number>>;
+  report: TrainReport;
+}

@@ -3,10 +3,14 @@ import type {
   AuthStatus,
   BacktestSpec,
   BarsResponse,
+  FeatureSetInfo,
   InstrumentHit,
   Job,
+  ModelInfo,
+  ModelSummary,
   SeriesInfo,
   StrategyInfo,
+  TrainingSpec,
 } from "./types";
 
 export class ApiError extends Error {
@@ -45,6 +49,7 @@ export const api = {
 
   strategies: () => request<StrategyInfo[]>("/catalog/strategies"),
   allocators: () => request<AllocatorInfo[]>("/catalog/allocators"),
+  featureSets: () => request<FeatureSetInfo[]>("/catalog/feature-sets"),
 
   series: () => request<SeriesInfo[]>("/lake/series"),
   bars: (params: {
@@ -82,6 +87,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(spec),
     }),
+
+  submitTraining: (spec: TrainingSpec) =>
+    request<{ job_id: string }>("/training", {
+      method: "POST",
+      body: JSON.stringify(spec),
+    }),
+  models: () => request<ModelSummary[]>("/models"),
+  model: (id: string) => request<ModelInfo>(`/models/${id}`),
 
   job: (id: string) => request<Job>(`/jobs/${id}`),
   jobs: () => request<Job[]>("/jobs"),
