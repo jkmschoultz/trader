@@ -62,3 +62,6 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "slow: trains a tiny model; skip with -m 'not slow'",
+]
