@@ -175,8 +175,8 @@ weights under a leverage cap. See [docs/backtest.md](docs/backtest.md).
 |---|---|---|
 | 0 | Scaffold, OAuth2, rate-limited client | done, verified against sim |
 | 1 | Data layer, history-depth spike, session calendars | done, verified against sim |
-| 2 | Strategy interface + backtest engine | done |
-| 3 | FastAPI + React UI | in progress |
+| 2 | Strategy interface + backtest engine | done, verified against sim |
+| 3 | FastAPI + React UI | done, verified against sim |
 | 4 | Features, triple-barrier labels, LSTM | |
 | 5 | Paper trading | |
 | 6 | Live trading (gated) | |

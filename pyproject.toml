@@ -62,6 +62,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# importlib mode lets two test files share a basename without an __init__.py
+# (e.g. tests/features/ and tests/models/ both wanting test_pipeline.py).
+addopts = "--import-mode=importlib"
 markers = [
     "slow: trains a tiny model; skip with -m 'not slow'",
 ]
