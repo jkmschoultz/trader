@@ -34,6 +34,11 @@ api = [
 ui = [
     "trader[data,api]",
 ]
+# The model layer as well -- torch is ~1-2 GB, so it stays out of `ui`; install
+# `.[ui,model]` (or `.[full]`) to train from the Train tab.
+full = [
+    "trader[data,api,model]",
+]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

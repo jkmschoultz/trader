@@ -16,7 +16,7 @@ Decisions, from least to most explicit
   instrument into portfolio weights, and the engine sizes those to whole units
   at the next bar's open. Optional ``stop``/``take``/``max_bars`` attach a
   bracket, expressed as fractions of the entry price and a bar count -- the same
-  three barriers Phase 3's triple-barrier labelling uses.
+  three barriers Phase 4's triple-barrier labelling uses.
 * :class:`Orders` -- an escape hatch carrying explicit unit counts. It bypasses
   the allocator and the equity-fraction sizing entirely, for a strategy that
   needs to place its own orders (a grid, a scale-in ladder).

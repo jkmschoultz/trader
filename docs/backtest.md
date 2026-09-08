@@ -27,8 +27,8 @@ its close instead, as an `exit_reason == "end"` trade.
 
 A `Target(weight, stop, take, max_bars)` attaches a bracket, with `stop` and
 `take` as **fractions of the entry price** and `max_bars` a bar count — the
-three barriers of Phase 3's triple-barrier labelling, so the parameterisation is
-shared on purpose.
+three barriers of Phase 4's triple-barrier labelling (`docs/labels.md`), so the
+parameterisation is shared on purpose.
 
 Brackets are checked intrabar against each completed bar's `high`/`low`:
 

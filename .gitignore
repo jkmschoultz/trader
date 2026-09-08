@@ -5,9 +5,10 @@
 state/
 *.key
 
-# Market data lake (sync to GPU box, never commit). Anchored to the repo root
-# -- an unanchored "data/" also matches src/trader/data/, silently excluding
-# that whole package from version control.
+# Market data lake, feature cache (data/features/), and the trained-model
+# registry (data/models/) -- all derived, all sync to the GPU box, never commit.
+# Anchored to the repo root: an unanchored "data/" also matches src/trader/data/,
+# silently excluding that whole package from version control.
 /data/
 
 # Model artifacts

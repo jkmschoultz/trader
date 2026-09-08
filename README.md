@@ -4,8 +4,8 @@ An intraday trading system on the Saxo Bank OpenAPI: research and backtesting, p
 live trading, and a UI to drive all of it. The modelling centrepiece is a multi-timeframe LSTM
 classifier trained on triple-barrier labels.
 
-**Status: Phase 3 (FastAPI + React UI) in progress.** Phases 0-2 are complete and verified
-against sim. See [the plan](#roadmap) for what comes next.
+**Status: Phase 4 (features, triple-barrier labels, LSTM) in progress.** Phases 0-3 are
+complete and verified against sim. See [the plan](#roadmap) for what comes next.
 
 ## Setup
 
@@ -121,18 +121,18 @@ it, a test constructing `Settings()` would pick up live credentials.
 |---|---|
 | `src/trader/saxo/` | API client: auth, rate limiting, charts, streaming, trading |
 | `src/trader/data/` | Parquet lake, ingestion, session calendars, bar alignment |
-| `src/trader/features/` | Causal feature pipeline |
-| `src/trader/labels/` | Triple-barrier labelling |
-| `src/trader/models/` | Dataset windowing, LSTM, training, model registry |
-| `src/trader/strategies/` | `Strategy` ABC, registry, `ma_cross` and `orb` |
+| `src/trader/features/` | Causal feature pipeline ([docs/features.md](docs/features.md)) |
+| `src/trader/labels/` | Triple-barrier labelling ([docs/labels.md](docs/labels.md)) |
+| `src/trader/models/` | Dataset windowing, LSTM, training, model registry ([docs/model.md](docs/model.md)) |
+| `src/trader/strategies/` | `Strategy` ABC, registry, `ma_cross`, `orb`, `lstm` |
 | `src/trader/backtest/` | Event-driven engine, allocators, cost model, metrics |
 | `src/trader/service/` | Framework-agnostic orchestration shared by the CLI and the API |
 | `src/trader/api/` | FastAPI service: catalogue, lake, backtests, background jobs |
 | `src/trader/execution/` | Broker abstraction: paper and live |
 | `frontend/` | React/Vite/Tailwind UI |
 
-`saxo/`, `data/`, `strategies/`, `backtest/`, `service/`, `api/`, `frontend/`, and the config
-layer exist so far.
+`saxo/`, `data/`, `features/`, `labels/`, `models/`, `strategies/`, `backtest/`, `service/`,
+`api/`, `frontend/`, and the config layer exist so far. `execution/` arrives in Phase 5.
 
 ## Design notes
 
@@ -177,7 +177,7 @@ weights under a leverage cap. See [docs/backtest.md](docs/backtest.md).
 | 1 | Data layer, history-depth spike, session calendars | done, verified against sim |
 | 2 | Strategy interface + backtest engine | done, verified against sim |
 | 3 | FastAPI + React UI | done, verified against sim |
-| 4 | Features, triple-barrier labels, LSTM | |
+| 4 | Features, triple-barrier labels, LSTM | in progress |
 | 5 | Paper trading | |
 | 6 | Live trading (gated) | |
 

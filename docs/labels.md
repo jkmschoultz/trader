@@ -1,0 +1,70 @@
+# Triple-barrier labelling: matching the engine's bracket
+
+Phase 4b is `trader.labels`. `triple_barrier(frame, *, stop, take, max_bars,
+min_return, entry)` turns a bar frame into `{-1, 0, +1}` training targets by
+asking, for every bar: *if the model fires here, you enter at the next bar's
+open — which barrier does the trade hit first?*
+
+## The barriers are the engine's `Target` bracket
+
+`stop` and `take` are positive fractions of the entry price; `max_bars` is a
+bar count. These are exactly the three barriers a
+`trader.strategies.base.Target(weight, stop, take, max_bars)` attaches in the
+backtest engine (`docs/backtest.md`). The parameterisation is shared on purpose:
+a model trained on these labels, traded through `LSTMStrategy` with `bracket=True`,
+places the bracket it was taught.
+
+Semantics, matched to the engine bar for bar:
+
+- **Entry** is the next bar's open (`entry="next_open"`, the default and the only
+  mode the engine supports). `entry="close"` exists for research.
+- For each later bar, `high` is checked against `entry * (1 + take)` and `low`
+  against `entry * (1 - stop)`.
+- **Stop wins ties.** If one bar's range spans both levels, the label is the
+  stop (`-1`). Real fills are path-dependent and unknowable from OHLC; assuming
+  the adverse touch came first biases labels the safe way, the same downward
+  bias the engine applies.
+- If neither barrier is touched within `max_bars` bars, the **vertical barrier**
+  fires: exit at that bar's open, label `sign(return)`, with `|return| <=
+  min_return` collapsing to `0` (a dead-band so a flat drift is not called a
+  direction).
+
+`touch_price` is the barrier level, not a guaranteed fill — the same caveat the
+engine's bracket exits carry.
+
+## Indexing and the trailing NaN band
+
+The result frame is indexed by the **decision bar** (the bar the model sees),
+one row per input bar, so it aligns 1:1 with a feature frame on `time`. Columns:
+`label`, `entry_time`, `entry_price`, `touch_time`, `touch_price`, `barrier`
+(`"stop"` / `"take"` / `"time"` / None), `bars_held`, `ret`.
+
+The last `1 + max_bars` rows have no room for a full forward window and get
+`label = NaN`. Those are dropped at the dataset boundary, never earlier. The
+causality tests (`tests/labels/test_causality.py`) check the other direction: a
+label may look forward, but perturbing a bar beyond `entry_offset + max_bars`
+from the decision bar must not change it.
+
+## Sample weights — shallow, on purpose
+
+Triple-barrier events overlap: while one is open the next few start, so treating
+every labelled row as independent over-counts crowded stretches.
+`trader.labels.weights` provides two corrections:
+
+- `average_uniqueness` — the mean of `1 / concurrency` over an event's life.
+- `return_attribution_weights` — `|ret| * average_uniqueness`, normalised to
+  mean 1; a big move that barely overlaps anything counts most.
+
+Training uses class weighting by default and multiplies in these per-sample
+weights only when `use_sample_weights=True`. The full sequential-bootstrap
+treatment (López de Prado, ch. 4) is deliberately left for a later phase —
+overlap weighting matters most for bagged trees on non-overlapping events, and
+class balance is the bigger lever for a first sequence model.
+
+## Inspecting a parameterisation
+
+`trader labels --symbol AAPL --stop 0.005 --take 0.01 --max-bars 24` (or
+`POST /api/…` via the service) prints the class balance, the stop/take/time
+barrier breakdown, mean `|ret|`, and median bars held — enough to tell whether a
+barrier choice produces a usable label distribution before committing a training
+run to it.
