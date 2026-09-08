@@ -16,11 +16,13 @@
 
     trader features list                    # registered feature sets
     trader features build --symbol SYMBOL   # compute model features from the lake
+    trader labels --symbol SYMBOL           # triple-barrier label balance
 
     trader serve                      # run the API + UI (needs the [api] extra)
 
-The ``data``, ``backtest``, and ``features`` subcommands need the optional data
-dependencies (``pip install -e ".[data]"``); ``serve`` also needs ``[api]``.
+The ``data``, ``backtest``, ``features``, and ``labels`` subcommands need the
+optional data dependencies (``pip install -e ".[data]"``); ``serve`` also needs
+``[api]``.
 """
 
 from __future__ import annotations
@@ -530,6 +532,61 @@ async def _cmd_features_build(settings: Settings, args) -> int:
     return 0
 
 
+# ------------------------------------------------------------------------- labels
+
+
+async def _cmd_labels(settings: Settings, args) -> int:
+    _require_data_extra()
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    from trader.service.errors import ServiceError  # noqa: PLC0415
+    from trader.service.labels import LabelSpec, run_labelling  # noqa: PLC0415
+
+    try:
+        spec = LabelSpec(
+            symbols=[args.symbol],
+            uics=[args.uic] if args.uic is not None else [],
+            asset_type=args.asset_type,
+            exchange=args.exchange,
+            horizon=args.horizon,
+            since=args.since,
+            stop=args.stop,
+            take=args.take,
+            max_bars=args.max_bars,
+            min_return=args.min_return,
+        )
+    except ValidationError as exc:
+        raise UsageError(_first_error(exc)) from exc
+
+    try:
+        summary = await run_labelling(settings, spec)
+    except ServiceError as exc:
+        raise UsageError(str(exc)) from exc
+
+    barriers = summary["barriers"]
+    print(
+        f"\nbarriers: stop={barriers['stop']} take={barriers['take']} "
+        f"max_bars={barriers['max_bars']}  min_return={args.min_return}"
+    )
+    print(f"events:   {summary['n_events']:,}")
+    counts, pct = summary["class_counts"], summary["class_pct"]
+    for cls, name in ((-1, "down (-1)"), (0, "flat ( 0)"), (1, "up   (+1)")):
+        print(f"  {name}   {counts[cls]:>8,}   {pct[cls]:>7.1%}")
+    breakdown = summary["barrier_breakdown"]
+    print(
+        f"barrier:  stop {breakdown['stop']:,}  take {breakdown['take']:,}  "
+        f"time {breakdown['time']:,}"
+    )
+    print(f"mean |ret|:       {summary['mean_abs_ret']}")
+    print(f"median bars held: {summary['median_bars_held']}")
+
+    if len(summary["per_symbol"]) > 1:
+        print("\nper symbol:")
+        for label, item in summary["per_symbol"].items():
+            print(f"  {label:<12} {item['n_events']:,} events  {item['class_pct']}")
+    return 0
+
+
 # -------------------------------------------------------------------------- serve
 
 
@@ -714,6 +771,18 @@ def _build_parser() -> argparse.ArgumentParser:
     fb.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
     fb.add_argument("--persist", action="store_true", help="also write to the feature cache")
 
+    labels_p = sub.add_parser("labels", help="triple-barrier label balance for a symbol")
+    labels_p.add_argument("--symbol", required=True)
+    labels_p.add_argument("--uic", type=int, help="skip symbol resolution")
+    labels_p.add_argument("--asset-type", help="asset type (default Stock)")
+    labels_p.add_argument("--exchange", help="preferred exchange suffix for a bare ticker")
+    labels_p.add_argument("--horizon", default="5m", help="bar size (default 5m)")
+    labels_p.add_argument("--stop", type=float, default=0.005, help="stop fraction (default 0.005)")
+    labels_p.add_argument("--take", type=float, default=0.01, help="take fraction (default 0.01)")
+    labels_p.add_argument("--max-bars", type=int, default=24, help="vertical barrier (default 24)")
+    labels_p.add_argument("--min-return", type=float, default=0.0, help="timeout deadband")
+    labels_p.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
+
     serve_p = sub.add_parser("serve", help="run the API and, if built, the UI")
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
@@ -767,6 +836,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_features_list(settings)
             if args.features_command == "build":
                 return asyncio.run(_cmd_features_build(settings, args))
+        elif args.command == "labels":
+            return asyncio.run(_cmd_labels(settings, args))
         elif args.command == "serve":
             return _cmd_serve(settings, args)
     except ReauthRequired as exc:
