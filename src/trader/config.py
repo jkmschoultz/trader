@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     # Local state: encrypted tokens, instrument cache. Never committed.
     state_dir: Path = PROJECT_ROOT / "state"
     data_dir: Path = PROJECT_ROOT / "data"
+    # Trained-model registry. Defaults to ``data_dir / "models"`` so it rides the
+    # same sync to a training box; set explicitly to move it. Never committed.
+    models_dir: Path | None = None
 
     # Explicit opt-in required before any code path may place a real order.
     # Setting environment=live is deliberately not sufficient on its own.
@@ -120,6 +123,10 @@ class Settings(BaseSettings):
             self.state_dir = PROJECT_ROOT / self.state_dir
         if not self.data_dir.is_absolute():
             self.data_dir = PROJECT_ROOT / self.data_dir
+        if self.models_dir is None:
+            self.models_dir = self.data_dir / "models"
+        elif not self.models_dir.is_absolute():
+            self.models_dir = PROJECT_ROOT / self.models_dir
         return self
 
     @property

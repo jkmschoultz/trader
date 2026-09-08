@@ -18,9 +18,13 @@ from trader.models.dataset import (
     build_bundle,
     time_split,
 )
+from trader.models.registry import ModelInfo, ModelNotFound, ModelRegistry
 from trader.models.scaler import StandardScaler
 
 __all__ = [
+    "ModelInfo",
+    "ModelNotFound",
+    "ModelRegistry",
     "SequenceBundle",
     "SplitSpec",
     "StandardScaler",
