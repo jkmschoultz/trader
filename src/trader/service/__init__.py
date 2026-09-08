@@ -14,19 +14,23 @@ from __future__ import annotations
 
 from trader.service.catalog import (
     AllocatorInfo,
+    FeatureSetInfo,
     ParamInfo,
     StrategyInfo,
     list_allocators,
+    list_feature_sets,
     list_strategies,
 )
 from trader.service.inputs import coerce_scalar, parse_params, parse_since
 
 __all__ = [
     "AllocatorInfo",
+    "FeatureSetInfo",
     "ParamInfo",
     "StrategyInfo",
     "coerce_scalar",
     "list_allocators",
+    "list_feature_sets",
     "list_strategies",
     "parse_params",
     "parse_since",

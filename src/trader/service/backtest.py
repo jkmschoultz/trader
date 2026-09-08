@@ -9,7 +9,6 @@ instrument, and calls :func:`trader.backtest.run`.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -17,10 +16,8 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from trader.config import Settings
-from trader.service.errors import InvalidRequest, SeriesNotStored
+from trader.service.errors import InvalidRequest
 from trader.service.inputs import parse_since
-
-log = logging.getLogger(__name__)
 
 __all__ = ["BacktestSpec", "run_backtest"]
 
@@ -92,13 +89,7 @@ async def run_backtest(
     """
     from trader import backtest as bt
     from trader import strategies
-    from trader.data import bars as bars_mod
-    from trader.data import calendars
-    from trader.data.lake import BarLake, SeriesKey
-    from trader.saxo.charts import horizon_label
-    from trader.saxo.client import SaxoAPIError, SaxoClient
-    from trader.saxo.exchanges import get_exchange
-    from trader.service.instruments import resolve_symbol
+    from trader.service._panel import load_panel
 
     try:
         strategy = strategies.get_strategy(spec.strategy)(**spec.params)
@@ -112,62 +103,19 @@ async def run_backtest(
     except KeyError as exc:
         raise InvalidRequest(exc.args[0]) from exc
 
-    store = BarLake(settings.data_dir)
-    padded_uics = list(spec.uics) + [None] * (len(spec.symbols) - len(spec.uics))
-    need_network = any(uic is None for uic in padded_uics)
-
-    panel: dict[str, Any] = {}
-    instruments: dict[str, Any] = {}
-
-    def _read(label: str, key: SeriesKey):
-        frame = store.read(key)
-        if spec.since is not None:
-            frame = bars_mod.clip(frame, start=spec.since)
-        if frame.empty:
-            raise SeriesNotStored(
-                label,
-                horizon_label(spec.horizon),
-                asset_type=key.asset_type,
-                uic=key.uic,
-                since=spec.since.isoformat() if spec.since else None,
-            )
-        return frame
-
-    async def _add(symbol: str, uic: int | None, client: SaxoClient | None) -> None:
-        exchange_id = None
-        if uic is None:
-            instrument = await resolve_symbol(
-                client,
-                symbol,
-                asset_type=spec.asset_type,
-                prefer=[e for e in (spec.exchange, *settings.saxo.preferred_exchanges) if e],
-            )
-            label, uic, asset_type = instrument.symbol, instrument.uic, instrument.asset_type
-            exchange_id = instrument.exchange_id
-        else:
-            label, asset_type = symbol, (spec.asset_type or "Stock")
-
-        key = SeriesKey(asset_type, int(uic), spec.horizon)
-        frame = _read(label, key)
-
-        session = None
-        if client is not None and exchange_id:
-            try:
-                exchange = await get_exchange(client, exchange_id)
-                session = calendars.infer_regular_hours(frame, calendars.resolve_timezone(exchange))
-            except SaxoAPIError as exc:
-                log.warning("no session calendar for %s: %s", label, exc)
-
-        panel[label] = frame
-        instruments[label] = bt.Instrument(key=key, session=session)
-
-    if need_network:
-        async with SaxoClient(settings) as client:
-            for symbol, uic in zip(spec.symbols, padded_uics, strict=True):
-                await _add(symbol, uic, client)
-    else:
-        for symbol, uic in zip(spec.symbols, padded_uics, strict=True):
-            await _add(symbol, uic, None)
+    series = await load_panel(
+        settings,
+        symbols=spec.symbols,
+        uics=spec.uics,
+        asset_type=spec.asset_type,
+        exchange=spec.exchange,
+        horizon=spec.horizon,
+        since=spec.since,
+    )
+    panel: dict[str, Any] = {s.label: s.frame for s in series}
+    instruments: dict[str, Any] = {
+        s.label: bt.Instrument(key=s.key, session=s.session) for s in series
+    }
 
     return bt.run(
         panel,

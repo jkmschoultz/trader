@@ -12,9 +12,11 @@ from dataclasses import dataclass, field
 
 __all__ = [
     "AllocatorInfo",
+    "FeatureSetInfo",
     "ParamInfo",
     "StrategyInfo",
     "list_allocators",
+    "list_feature_sets",
     "list_strategies",
 ]
 
@@ -41,6 +43,16 @@ class AllocatorInfo:
     name: str
     summary: str
     params: list[ParamInfo] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FeatureSetInfo:
+    """One registered feature set: its name, blurb, and resolved columns."""
+
+    name: str
+    summary: str
+    columns: list[str]
+    context_capable: bool
 
 
 def _summary(obj: object) -> str:
@@ -98,3 +110,22 @@ def list_allocators() -> list[AllocatorInfo]:
         AllocatorInfo(name=name, summary=_summary(cls), params=_params(cls.__init__))
         for name, cls in available_allocators().items()
     ]
+
+
+def list_feature_sets() -> list[FeatureSetInfo]:
+    """Every registered feature set, sorted by name, with its base columns."""
+    from trader.features import available_feature_sets, get_feature_set
+
+    infos: list[FeatureSetInfo] = []
+    for name in available_feature_sets():
+        feature_set = get_feature_set(name)
+        spec = feature_set.resolve(base_horizon=5, context_horizons=())
+        infos.append(
+            FeatureSetInfo(
+                name=name,
+                summary=_summary(type(feature_set)),
+                columns=list(spec.columns),
+                context_capable=feature_set.context_capable,
+            )
+        )
+    return infos

@@ -14,10 +14,13 @@
 
     trader backtest --symbol SYMBOL --strategy NAME   # run a strategy over stored bars
 
+    trader features list                    # registered feature sets
+    trader features build --symbol SYMBOL   # compute model features from the lake
+
     trader serve                      # run the API + UI (needs the [api] extra)
 
-The ``data`` and ``backtest`` subcommands need the optional data dependencies
-(``pip install -e ".[data]"``); ``serve`` also needs ``[api]``.
+The ``data``, ``backtest``, and ``features`` subcommands need the optional data
+dependencies (``pip install -e ".[data]"``); ``serve`` also needs ``[api]``.
 """
 
 from __future__ import annotations
@@ -470,6 +473,63 @@ async def _cmd_backtest(settings: Settings, args) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------- features
+
+
+def _cmd_features_list(settings: Settings) -> int:
+    _require_data_extra()
+    from trader.service.catalog import list_feature_sets  # noqa: PLC0415
+
+    for info in list_feature_sets():
+        tag = "  (multi-timeframe)" if info.context_capable else ""
+        print(f"{info.name}{tag}")
+        if info.summary:
+            print(f"  {info.summary}")
+        print(f"  {len(info.columns)} columns: {', '.join(info.columns)}\n")
+    return 0
+
+
+async def _cmd_features_build(settings: Settings, args) -> int:
+    _require_data_extra()
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    from trader.service.errors import ServiceError  # noqa: PLC0415
+    from trader.service.features import FeatureBuildSpec, run_feature_build  # noqa: PLC0415
+
+    context = args.context.split(",") if args.context else []
+    try:
+        spec = FeatureBuildSpec(
+            symbols=[args.symbol],
+            uics=[args.uic] if args.uic is not None else [],
+            asset_type=args.asset_type,
+            exchange=args.exchange,
+            horizon=args.horizon,
+            context_horizons=context,
+            since=args.since,
+            feature_set=args.feature_set,
+            persist=args.persist,
+        )
+    except ValidationError as exc:
+        raise UsageError(_first_error(exc)) from exc
+
+    try:
+        summaries = await run_feature_build(settings, spec)
+    except ServiceError as exc:
+        raise UsageError(str(exc)) from exc
+
+    for summary in summaries:
+        print(f"\n{summary['key']}  ({summary['label']})  {summary['feature_set']}")
+        print(f"  rows        {summary['rows']:,}")
+        print(f"  columns     {len(summary['columns'])}")
+        print(f"  warmup      {summary['warmup']} bars")
+        print(f"  nan rows    {summary['nan_rows']:,}")
+        print(f"  span        {summary['first']} -> {summary['last']}")
+        print(f"  digest      {summary['digest'][:12]}")
+        if spec.persist:
+            print(f"  written     {summary['persisted_files']} file(s)")
+    return 0
+
+
 # -------------------------------------------------------------------------- serve
 
 
@@ -640,6 +700,20 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest_p.add_argument("--leverage", type=float, default=1.0, help="gross exposure cap")
     backtest_p.add_argument("--out", type=_path, help="write a JSON report here")
 
+    features_p = sub.add_parser("features", help="build causal model features from the lake")
+    features_sub = features_p.add_subparsers(dest="features_command", required=True)
+    features_sub.add_parser("list", help="registered feature sets and their columns")
+    fb = features_sub.add_parser("build", help="compute features for a symbol and summarise")
+    fb.add_argument("--symbol", required=True)
+    fb.add_argument("--uic", type=int, help="skip symbol resolution")
+    fb.add_argument("--asset-type", help="asset type (default Stock)")
+    fb.add_argument("--exchange", help="preferred exchange suffix for a bare ticker, e.g. xnas")
+    fb.add_argument("--horizon", default="5m", help="base bar size (default 5m)")
+    fb.add_argument("--context", help="comma-separated context horizons, e.g. 15m,1h")
+    fb.add_argument("--feature-set", default="price_v1", help="registered feature set")
+    fb.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
+    fb.add_argument("--persist", action="store_true", help="also write to the feature cache")
+
     serve_p = sub.add_parser("serve", help="run the API and, if built, the UI")
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
@@ -688,6 +762,11 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_cmd_data_sessions(settings, args))
         elif args.command == "backtest":
             return asyncio.run(_cmd_backtest(settings, args))
+        elif args.command == "features":
+            if args.features_command == "list":
+                return _cmd_features_list(settings)
+            if args.features_command == "build":
+                return asyncio.run(_cmd_features_build(settings, args))
         elif args.command == "serve":
             return _cmd_serve(settings, args)
     except ReauthRequired as exc:
