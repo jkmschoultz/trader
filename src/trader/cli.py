@@ -17,12 +17,14 @@
     trader features list                    # registered feature sets
     trader features build --symbol SYMBOL   # compute model features from the lake
     trader labels --symbol SYMBOL           # triple-barrier label balance
+    trader train --symbol SYMBOL ...        # train an LSTM and register it
+    trader models list|show                 # browse the model registry
 
     trader serve                      # run the API + UI (needs the [api] extra)
 
-The ``data``, ``backtest``, ``features``, and ``labels`` subcommands need the
-optional data dependencies (``pip install -e ".[data]"``); ``serve`` also needs
-``[api]``.
+The ``data``, ``backtest``, ``features``, ``labels``, and ``models`` subcommands
+need the optional data dependencies (``pip install -e ".[data]"``); ``train``
+also needs ``[model]`` and ``serve`` also needs ``[api]``.
 """
 
 from __future__ import annotations
@@ -93,6 +95,22 @@ def _require_backtest_extra():
         raise UsageError(
             f"the backtest command needs the optional data dependencies ({exc}). "
             'Install them with:  pip install -e ".[data]"'
+        ) from exc
+
+
+def _require_model_extra():
+    """Import the model layer, or explain the ``[model]`` extra (torch, sklearn)."""
+    try:
+        import sklearn  # noqa: F401, PLC0415
+        import torch  # noqa: F401, PLC0415
+
+        from trader import models  # noqa: PLC0415
+
+        return models
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise UsageError(
+            f"the train command needs the optional model dependencies ({exc}). "
+            'Install them with:  pip install -e ".[model]"'
         ) from exc
 
 
@@ -587,6 +605,114 @@ async def _cmd_labels(settings: Settings, args) -> int:
     return 0
 
 
+# -------------------------------------------------------------------------- train
+
+
+async def _cmd_train(settings: Settings, args) -> int:
+    _require_model_extra()
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    from trader.service.errors import ServiceError  # noqa: PLC0415
+    from trader.service.training import TrainingSpec, run_training  # noqa: PLC0415
+
+    context = args.context.split(",") if args.context else []
+    try:
+        spec = TrainingSpec(
+            symbols=args.symbol,
+            uics=args.uic,
+            asset_type=args.asset_type,
+            exchange=args.exchange,
+            name=args.name,
+            horizon=args.horizon,
+            context_horizons=context,
+            feature_set=args.feature_set,
+            stop=args.stop,
+            take=args.take,
+            max_bars=args.max_bars,
+            min_return=args.min_return,
+            window=args.window,
+            train_end=args.train_end,
+            val_end=args.val_end,
+            embargo_bars=args.embargo_bars,
+            since=args.since,
+            hidden=args.hidden,
+            layers=args.layers,
+            dropout=args.dropout,
+            bidirectional=args.bidirectional,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            use_sample_weights=args.sample_weights,
+            seed=args.seed,
+        )
+    except ValidationError as exc:
+        raise UsageError(_first_error(exc)) from exc
+
+    last = [0.0]
+
+    def _progress(value: float) -> None:
+        if value - last[0] >= 0.05 or value >= 1.0:
+            last[0] = value
+            print(f"  ... {value:5.0%}", end="\r", flush=True)
+
+    try:
+        result = await run_training(settings, spec, progress=_progress)
+    except ServiceError as exc:
+        raise UsageError(str(exc)) from exc
+
+    print(" " * 20, end="\r")
+    metrics = result["metrics"]
+    print(f"\nmodel_id: {result['model_id']}")
+    print("metrics:")
+    for key in ("val_acc", "val_macro_f1", "test_acc", "test_macro_f1"):
+        if key in metrics:
+            print(f"  {key:<16} {metrics[key]}")
+    report = result["report"]
+    confusions = (("val", report.get("val_confusion")), ("test", report.get("test_confusion")))
+    for name, matrix in confusions:
+        if matrix:
+            print(f"{name} confusion (rows = true down/flat/up):")
+            for row in matrix:
+                print("  " + "  ".join(f"{v:>6}" for v in row))
+    return 0
+
+
+# ------------------------------------------------------------------------- models
+
+
+def _cmd_models_list(settings: Settings) -> int:
+    _require_data_extra()
+    from trader.service.catalog import list_models  # noqa: PLC0415
+
+    rows = list_models(settings)
+    if not rows:
+        print(f"No models under {settings.models_dir}. Train one: trader train ...")
+        return 1
+    for model in rows:
+        ctx = f"+{','.join(map(str, model.context_horizons))}" if model.context_horizons else ""
+        f1 = model.metrics.get("test_macro_f1", model.metrics.get("val_macro_f1", "?"))
+        print(
+            f"{model.id:<40} {model.feature_set:<9} {model.horizon}m{ctx:<8} "
+            f"w{model.window:<4} f1={f1}"
+        )
+    print(f"\n{len(rows)} model(s).")
+    return 0
+
+
+def _cmd_models_show(settings: Settings, args) -> int:
+    _require_data_extra()
+    import json  # noqa: PLC0415
+
+    from trader.models.registry import ModelNotFound, ModelRegistry  # noqa: PLC0415
+
+    try:
+        manifest = ModelRegistry(settings.models_dir).manifest(args.model_id)
+    except ModelNotFound as exc:
+        raise UsageError(str(exc)) from exc
+    print(json.dumps(manifest, indent=2))
+    return 0
+
+
 # -------------------------------------------------------------------------- serve
 
 
@@ -783,6 +909,42 @@ def _build_parser() -> argparse.ArgumentParser:
     labels_p.add_argument("--min-return", type=float, default=0.0, help="timeout deadband")
     labels_p.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
 
+    train_p = sub.add_parser("train", help="train an LSTM and register it (needs [model])")
+    train_p.add_argument("--symbol", action="append", required=True, metavar="SYMBOL")
+    train_p.add_argument("--uic", action="append", type=int, default=[])
+    train_p.add_argument("--asset-type")
+    train_p.add_argument("--exchange")
+    train_p.add_argument("--name", default="lstm", help="registry name prefix")
+    train_p.add_argument("--horizon", default="5m")
+    train_p.add_argument("--context", help="comma-separated context horizons, e.g. 15m,1h")
+    train_p.add_argument("--feature-set", default="price_v1")
+    train_p.add_argument("--stop", type=float, default=0.005)
+    train_p.add_argument("--take", type=float, default=0.01)
+    train_p.add_argument("--max-bars", type=int, default=24)
+    train_p.add_argument("--min-return", type=float, default=0.0)
+    train_p.add_argument("--window", type=int, default=32, help="sequence length in bars")
+    train_p.add_argument("--train-end", required=True, help="train/val boundary date")
+    train_p.add_argument("--val-end", required=True, help="val/test boundary date")
+    train_p.add_argument("--embargo-bars", type=int, help="default window + max_bars")
+    train_p.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
+    train_p.add_argument("--hidden", type=int, default=64)
+    train_p.add_argument("--layers", type=int, default=2)
+    train_p.add_argument("--dropout", type=float, default=0.2)
+    train_p.add_argument("--bidirectional", action="store_true")
+    train_p.add_argument("--epochs", type=int, default=40)
+    train_p.add_argument("--batch-size", type=int, default=128)
+    train_p.add_argument("--lr", type=float, default=1e-3)
+    train_p.add_argument(
+        "--sample-weights", action="store_true", help="weight by return / uniqueness"
+    )
+    train_p.add_argument("--seed", type=int, default=0)
+
+    models_p = sub.add_parser("models", help="browse the trained-model registry")
+    models_sub = models_p.add_subparsers(dest="models_command", required=True)
+    models_sub.add_parser("list", help="every registered model")
+    models_show = models_sub.add_parser("show", help="the full manifest of one model")
+    models_show.add_argument("model_id")
+
     serve_p = sub.add_parser("serve", help="run the API and, if built, the UI")
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
@@ -838,6 +1000,13 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_cmd_features_build(settings, args))
         elif args.command == "labels":
             return asyncio.run(_cmd_labels(settings, args))
+        elif args.command == "train":
+            return asyncio.run(_cmd_train(settings, args))
+        elif args.command == "models":
+            if args.models_command == "list":
+                return _cmd_models_list(settings)
+            if args.models_command == "show":
+                return _cmd_models_show(settings, args)
         elif args.command == "serve":
             return _cmd_serve(settings, args)
     except ReauthRequired as exc:

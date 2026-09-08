@@ -87,12 +87,26 @@ async def run_backtest(
         SeriesNotStored: the lake has no bars for one of the symbols.
         trader.saxo.instruments.InstrumentNotFound: a symbol matched nothing.
     """
+    import inspect
+
     from trader import backtest as bt
     from trader import strategies
     from trader.service._panel import load_panel
 
     try:
-        strategy = strategies.get_strategy(spec.strategy)(**spec.params)
+        strategy_cls = strategies.get_strategy(spec.strategy)
+    except strategies.UnknownStrategy as exc:
+        raise InvalidRequest(str(exc)) from exc
+
+    params = dict(spec.params)
+    # A strategy that loads from the model registry (``lstm``) needs to know
+    # where it is; the request rarely says, so hand it the configured path.
+    accepts = inspect.signature(strategy_cls.__init__).parameters
+    if "models_dir" in accepts and "models_dir" not in params:
+        params["models_dir"] = str(settings.models_dir)
+
+    try:
+        strategy = strategy_cls(**params)
     except strategies.UnknownStrategy as exc:
         raise InvalidRequest(str(exc)) from exc
     except (TypeError, ValueError) as exc:

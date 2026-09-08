@@ -9,7 +9,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from trader.api.jobs import JobStore
-from trader.api.routes import auth, backtests, catalog, health, instruments, jobs, lake
+from trader.api.routes import (
+    auth,
+    backtests,
+    catalog,
+    health,
+    instruments,
+    jobs,
+    lake,
+    training,
+)
 from trader.config import Settings, get_settings
 
 # Where `npm run build` puts the compiled UI. Served at / when present.
@@ -37,7 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    for module in (health, auth, catalog, lake, instruments, backtests, jobs):
+    for module in (health, auth, catalog, lake, instruments, backtests, training, jobs):
         app.include_router(module.router, prefix="/api")
 
     # Anything under /api that no router matched is a genuine 404. Without this,

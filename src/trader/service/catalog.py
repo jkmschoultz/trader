@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from trader.config import Settings
 
 __all__ = [
     "AllocatorInfo",
     "FeatureSetInfo",
+    "ModelSummary",
     "ParamInfo",
     "StrategyInfo",
     "list_allocators",
     "list_feature_sets",
+    "list_models",
     "list_strategies",
 ]
 
@@ -53,6 +59,22 @@ class FeatureSetInfo:
     summary: str
     columns: list[str]
     context_capable: bool
+
+
+@dataclass(frozen=True)
+class ModelSummary:
+    """A registered model, trimmed to what a list view needs."""
+
+    id: str
+    name: str
+    created_at: str
+    horizon: int
+    context_horizons: list[int]
+    feature_set: str
+    window: int
+    barriers: dict[str, Any]
+    metrics: dict[str, Any]
+    symbols: list[str]
 
 
 def _summary(obj: object) -> str:
@@ -129,3 +151,24 @@ def list_feature_sets() -> list[FeatureSetInfo]:
             )
         )
     return infos
+
+
+def list_models(settings: Settings) -> list[ModelSummary]:
+    """Every registered model under ``settings.models_dir``, newest first. No torch."""
+    from trader.models.registry import ModelRegistry
+
+    return [
+        ModelSummary(
+            id=info.id,
+            name=info.name,
+            created_at=info.created_at,
+            horizon=info.base_horizon,
+            context_horizons=info.context_horizons,
+            feature_set=info.feature_set,
+            window=info.window,
+            barriers=info.barriers,
+            metrics=info.metrics,
+            symbols=info.symbols,
+        )
+        for info in ModelRegistry(settings.models_dir).list()
+    ]

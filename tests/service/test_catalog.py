@@ -1,8 +1,16 @@
-"""The strategy / allocator / feature-set catalogue the UI builds its forms from."""
+"""The strategy / allocator / feature-set / model catalogue the UI builds forms from."""
 
 from __future__ import annotations
 
-from trader.service import list_allocators, list_feature_sets, list_strategies
+import json
+
+from trader.config import Settings
+from trader.service import (
+    list_allocators,
+    list_feature_sets,
+    list_models,
+    list_strategies,
+)
 
 
 def test_lists_the_builtin_strategies_with_their_params():
@@ -38,3 +46,34 @@ def test_lists_feature_sets_with_their_columns():
     assert "rsi" in price.columns
     assert price.context_capable is False
     assert by_name["mtf_v1"].context_capable is True
+
+
+def test_list_models_is_empty_then_populated(tmp_path):
+    settings = Settings(data_dir=tmp_path, state_dir=tmp_path / "state")
+    assert list_models(settings) == []
+
+    model_dir = settings.models_dir / "lstm-20240101-000000-abcd1234"
+    model_dir.mkdir(parents=True)
+    (model_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "lstm-20240101-000000-abcd1234",
+                "name": "lstm",
+                "created_at": "2024-01-01T00:00:00+00:00",
+                "base_horizon": 5,
+                "context_horizons": [15],
+                "feature_set": "mtf_v1",
+                "feature_digest": "abc",
+                "window": 32,
+                "barriers": {"stop": 0.005, "take": 0.01, "max_bars": 24},
+                "metrics": {"val_macro_f1": 0.5},
+                "data": {"symbols": ["AAPL"], "asset_type": "Stock"},
+            }
+        )
+    )
+
+    (summary,) = list_models(settings)
+    assert summary.id == "lstm-20240101-000000-abcd1234"
+    assert summary.feature_set == "mtf_v1"
+    assert summary.context_horizons == [15]
+    assert summary.symbols == ["AAPL"]

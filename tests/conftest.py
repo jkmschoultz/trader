@@ -65,3 +65,39 @@ def _seed_5m_lake(root, *, uic: int = 211, asset_type: str = "Stock", bars: int 
 def seed_5m_lake():
     """Call ``seed_5m_lake(root, uic=..., bars=...)`` to write a series into a lake."""
     return _seed_5m_lake
+
+
+def _seed_trainable_lake(
+    root, *, uic: int = 211, asset_type: str = "Stock", bars: int = 1600, seed: int = 0
+) -> None:
+    """A longer random-walk 5-minute series -- enough to window, label, and split."""
+    import numpy as np
+
+    from trader.data.lake import BarLake, SeriesKey, bars_to_frame
+    from trader.saxo.charts import Bar
+
+    rng = np.random.default_rng(seed)
+    start = datetime(2024, 1, 2, 14, 30, tzinfo=UTC)
+    close = 100.0 + np.cumsum(rng.normal(0.0, 0.25, bars))
+    BarLake(root).write(
+        SeriesKey(asset_type, uic, 5),
+        bars_to_frame(
+            [
+                Bar(
+                    Time=start + timedelta(minutes=5 * i),
+                    open=float(p),
+                    high=float(p) + 0.35,
+                    low=float(p) - 0.35,
+                    close=float(p),
+                    volume=1_000.0 + i,
+                )
+                for i, p in enumerate(close)
+            ]
+        ),
+    )
+
+
+@pytest.fixture
+def seed_trainable_lake():
+    """Call ``seed_trainable_lake(root, bars=...)`` for a series long enough to train on."""
+    return _seed_trainable_lake

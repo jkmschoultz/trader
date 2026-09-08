@@ -264,3 +264,111 @@ def test_backtest_golden_run_prints_metrics_and_writes_a_report(capsys, monkeypa
     report = json.loads(out.read_text())
     assert report["config"]["labels"] == ["X"]
     assert "metrics" in report and "equity" in report
+
+
+# ------------------------------------------------------------------- features / labels / train
+
+
+def test_features_build_parses_context_and_flags():
+    args = _build_parser().parse_args(
+        ["features", "build", "--symbol", "AAPL", "--context", "15m,1h", "--persist"]
+    )
+    assert args.features_command == "build"
+    assert args.context == "15m,1h"
+    assert args.persist is True
+    assert args.feature_set == "price_v1"
+
+
+def test_labels_defaults():
+    args = _build_parser().parse_args(["labels", "--symbol", "AAPL"])
+    assert args.stop == 0.005 and args.take == 0.01 and args.max_bars == 24
+
+
+def test_train_requires_the_split_dates():
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["train", "--symbol", "X"])
+
+    args = _build_parser().parse_args(
+        [
+            "train",
+            "--symbol",
+            "X",
+            "--symbol",
+            "Y",
+            "--feature-set",
+            "mtf_v1",
+            "--context",
+            "15m,1h",
+            "--window",
+            "48",
+            "--train-end",
+            "2025-04-01",
+            "--val-end",
+            "2025-06-01",
+            "--sample-weights",
+        ]
+    )
+    assert args.symbol == ["X", "Y"]
+    assert args.window == 48
+    assert args.sample_weights is True
+    assert args.epochs == 40
+
+
+def test_models_needs_a_subcommand():
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["models"])
+    assert _build_parser().parse_args(["models", "show", "abc"]).model_id == "abc"
+
+
+def test_models_list_on_an_empty_registry_exits_one(capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path))
+    code = main(["models", "list"])
+    assert code == 1
+    assert "trader train" in capsys.readouterr().out
+
+
+@pytest.mark.slow
+def test_train_golden_run_registers_a_model(capsys, monkeypatch, tmp_path, seed_trainable_lake):
+    pytest.importorskip("torch")
+    seed_trainable_lake(tmp_path, bars=1600)
+    monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path))
+
+    code = main(
+        [
+            "train",
+            "--symbol",
+            "X",
+            "--uic",
+            "211",
+            "--asset-type",
+            "Stock",
+            "--horizon",
+            "5m",
+            "--stop",
+            "0.01",
+            "--take",
+            "0.01",
+            "--max-bars",
+            "6",
+            "--window",
+            "8",
+            "--train-end",
+            "2024-01-08",
+            "--val-end",
+            "2024-01-10",
+            "--hidden",
+            "8",
+            "--layers",
+            "1",
+            "--epochs",
+            "2",
+            "--batch-size",
+            "16",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "model_id: lstm-" in out
+
+    assert main(["models", "list"]) == 0
+    assert "lstm-" in capsys.readouterr().out
