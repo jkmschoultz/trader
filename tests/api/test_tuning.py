@@ -39,6 +39,7 @@ _SPEC = {
     },
     "cv": {"folds": 2, "train_days": 8, "val_days": 2, "test_days": 1.5, "fee_bps": 0.2},
     "grid": {"threshold": [0.0, 0.3]},
+    "max_workers": 1,
 }
 
 

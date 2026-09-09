@@ -37,6 +37,7 @@ def _spec(grid: dict) -> TuningSpec:
         ),
         cv=dict(folds=2, train_days=8, val_days=2, test_days=1.5, fee_bps=0.2, spread_bps=1.0),
         grid=grid,
+        max_workers=1,  # in-process: no torch subprocesses under pytest
     )
 
 
@@ -76,6 +77,23 @@ async def test_a_broken_config_is_recorded_not_fatal(cv_settings):
 def test_grid_key_must_be_a_real_field():
     with pytest.raises(ValueError, match="not a TrainingSpec or CVConfig field"):
         _spec({"nonsense": [1, 2]})
+
+
+def test_resolved_workers_caps_at_configs_and_cpu():
+    spec = _spec({"window": [8, 12, 16]})
+    spec = spec.model_copy(update={"max_workers": 0})
+    assert 1 <= spec.resolved_workers(3) <= 3
+    assert spec.model_copy(update={"max_workers": 8}).resolved_workers(3) == 3
+    assert spec.model_copy(update={"max_workers": 2}).resolved_workers(3) == 2
+
+
+async def test_sweep_runs_across_processes(cv_settings):
+    """max_workers=2 fans the configs out to a process pool and still ranks them."""
+    spec = _spec({"threshold": [0.0, 0.3]}).model_copy(update={"max_workers": 2})
+    report = await run_tuning(cv_settings, spec)
+
+    assert report["n_configs"] == 2 and report["n_errored"] == 0
+    assert [r["rank"] for r in report["results"]] == [1, 2]
 
 
 def test_base_split_dates_are_rejected():

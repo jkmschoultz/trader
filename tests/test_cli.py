@@ -344,6 +344,7 @@ def test_tune_parses_grid_and_cv_flags():
     )
     assert args.grid == ["window=16,32", "stop=0.004,0.008"]
     assert args.folds == 4 and args.cv_mode == "rolling"
+    assert args.workers == 0
     assert _parse_grid(args.grid) == {"window": [16, 32], "stop": [0.004, 0.008]}
 
 
@@ -456,6 +457,8 @@ def test_tune_golden_run_prints_a_ranked_table(capsys, monkeypatch, tmp_path, se
             "1.5",
             "--grid",
             "threshold=0.0,0.3",
+            "--workers",
+            "1",
             "--out",
             str(out_path),
         ]

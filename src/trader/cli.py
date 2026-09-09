@@ -752,6 +752,7 @@ async def _cmd_tune(settings: Settings, args) -> int:
             ),
             grid=_parse_grid(args.grid),
             top_k=args.top,
+            max_workers=args.workers,
         )
     except ValidationError as exc:
         raise UsageError(_first_error(exc)) from exc
@@ -1086,6 +1087,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="field to sweep, e.g. --grid window=16,32 --grid stop=0.004,0.008",
     )
     tune_p.add_argument("--top", type=int, default=5, help="configs to keep in report['top']")
+    tune_p.add_argument(
+        "--workers", type=int, default=0, help="parallel configs (0 = auto, 1 = in-process)"
+    )
     tune_p.add_argument("--out", help="also write the full JSON report here")
 
     models_p = sub.add_parser("models", help="browse the trained-model registry")

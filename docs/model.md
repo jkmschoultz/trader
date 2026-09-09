@@ -64,10 +64,14 @@ accuracy is not the selection metric — out-of-sample Sharpe is.
 `run_tuning(settings, TuningSpec)` (`trader.service.tuning`) sweeps a `grid` of
 `TrainingSpec` / `CVConfig` fields: the cartesian product, each combo through
 `run_cv`, ranked by median OOS Sharpe (tie-break lower turnover). A per-config
-failure is an error row, not fatal. `build_report` / `render` / `save_report`
-mirror `trader.data.depth` — a JSON-safe dict, a terminal table, a file under
-`state/`. Driven by `trader tune --symbol … --grid window=16,32 --grid
-stop=0.004,0.008 --folds 5` and `POST /api/tuning` (a `kind="tuning"` job).
+failure is an error row, not fatal. Configs run in parallel over a
+`ProcessPoolExecutor` (`max_workers`, default `min(4, configs, cpu//2)`; `1` =
+in-process) using a `spawn` context since torch is already loaded in the parent;
+each finished config emits an `on_message` line (`config i/n done — best median
+Sharpe …`) onto the job. `build_report` / `render` / `save_report` mirror
+`trader.data.depth` — a JSON-safe dict, a terminal table, a file under `state/`.
+Driven by `trader tune --symbol … --grid window=16,32 --grid stop=0.004,0.008
+--folds 5 --workers 4` and `POST /api/tuning` (a `kind="tuning"` job).
 
 ## The model
 

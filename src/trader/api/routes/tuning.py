@@ -28,7 +28,12 @@ async def submit_tuning(
     jobs: JobStore = Depends(get_jobs),
 ) -> dict[str, str]:
     async def run(report: Any) -> Any:
-        result = await run_tuning(settings, spec, progress=lambda p: report(progress=p))
+        result = await run_tuning(
+            settings,
+            spec,
+            progress=lambda p: report(progress=p),
+            on_message=lambda m: report(message=m),
+        )
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path = save_report(result, settings.state_dir / f"tuning-{stamp}.json")
         return {**result, "report_path": str(path)}
