@@ -18,6 +18,7 @@
     trader features build --symbol SYMBOL   # compute model features from the lake
     trader labels --symbol SYMBOL           # triple-barrier label balance
     trader train --symbol SYMBOL ...        # train an LSTM and register it
+    trader tune --symbol SYMBOL --grid K=v1,v2   # walk-forward grid sweep
     trader models list|show                 # browse the model registry
 
     trader serve                      # run the API + UI (needs the [api] extra)
@@ -677,6 +678,104 @@ async def _cmd_train(settings: Settings, args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- tune
+
+
+def _parse_grid(items: list[str]) -> dict[str, list[object]]:
+    """Turn ``["window=16,32", "lr=1e-3,3e-4"]`` into ``{"window": [16, 32], ...}``."""
+    from trader.service.inputs import coerce_scalar  # noqa: PLC0415
+
+    grid: dict[str, list[object]] = {}
+    for item in items:
+        if "=" not in item:
+            raise UsageError(f"--grid must be KEY=v1,v2 (got {item!r})")
+        key, _, raw = item.partition("=")
+        values = [coerce_scalar(v.strip()) for v in raw.split(",") if v.strip()]
+        if not values:
+            raise UsageError(f"--grid {key}: no values")
+        grid[key.strip()] = values
+    return grid
+
+
+async def _cmd_tune(settings: Settings, args) -> int:
+    _require_model_extra()
+    from pathlib import Path  # noqa: PLC0415
+
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    from trader.service.errors import ServiceError  # noqa: PLC0415
+    from trader.service.tuning import TuningSpec, render, run_tuning, save_report  # noqa: PLC0415
+
+    context = args.context.split(",") if args.context else []
+    try:
+        spec = TuningSpec(
+            base=dict(
+                symbols=args.symbol,
+                uics=args.uic,
+                asset_type=args.asset_type,
+                exchange=args.exchange,
+                name=args.name,
+                horizon=args.horizon,
+                context_horizons=context,
+                feature_set=args.feature_set,
+                stop=args.stop,
+                take=args.take,
+                max_bars=args.max_bars,
+                min_return=args.min_return,
+                window=args.window,
+                embargo_bars=args.embargo_bars,
+                since=args.since,
+                hidden=args.hidden,
+                layers=args.layers,
+                dropout=args.dropout,
+                bidirectional=args.bidirectional,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                use_sample_weights=args.sample_weights,
+                seed=args.seed,
+            ),
+            cv=dict(
+                folds=args.folds,
+                mode=args.cv_mode,
+                train_days=args.train_days,
+                val_days=args.val_days,
+                test_days=args.test_days,
+                step_days=args.step_days,
+                fee_bps=args.fee_bps,
+                spread_bps=args.spread_bps,
+                slippage_bps=args.slippage_bps,
+                allocator=args.allocator,
+                leverage=args.leverage,
+                threshold=args.threshold,
+                on_no_signal=args.on_no_signal,
+            ),
+            grid=_parse_grid(args.grid),
+            top_k=args.top,
+        )
+    except ValidationError as exc:
+        raise UsageError(_first_error(exc)) from exc
+
+    last = [0.0]
+
+    def _progress(value: float) -> None:
+        if value - last[0] >= 0.02 or value >= 1.0:
+            last[0] = value
+            print(f"  ... {value:5.0%}", end="\r", flush=True)
+
+    try:
+        report = await run_tuning(settings, spec, progress=_progress)
+    except ServiceError as exc:
+        raise UsageError(str(exc)) from exc
+
+    print(" " * 20, end="\r")
+    print(render(report))
+    if args.out:
+        path = save_report(report, Path(args.out))
+        print(f"\nreport: {path}")
+    return 0
+
+
 # ------------------------------------------------------------------------- models
 
 
@@ -939,6 +1038,56 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     train_p.add_argument("--seed", type=int, default=0)
 
+    tune_p = sub.add_parser(
+        "tune", help="walk-forward grid sweep over training knobs (needs [model])"
+    )
+    tune_p.add_argument("--symbol", action="append", required=True, metavar="SYMBOL")
+    tune_p.add_argument("--uic", action="append", type=int, default=[])
+    tune_p.add_argument("--asset-type")
+    tune_p.add_argument("--exchange")
+    tune_p.add_argument("--name", default="lstm", help="registry name prefix")
+    tune_p.add_argument("--horizon", default="15m")
+    tune_p.add_argument("--context", help="comma-separated context horizons, e.g. 1h,4h")
+    tune_p.add_argument("--feature-set", default="price_v1")
+    tune_p.add_argument("--stop", type=float, default=0.005)
+    tune_p.add_argument("--take", type=float, default=0.01)
+    tune_p.add_argument("--max-bars", type=int, default=24)
+    tune_p.add_argument("--min-return", type=float, default=0.0)
+    tune_p.add_argument("--window", type=int, default=32)
+    tune_p.add_argument("--embargo-bars", type=int, help="default window + max_bars")
+    tune_p.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
+    tune_p.add_argument("--hidden", type=int, default=64)
+    tune_p.add_argument("--layers", type=int, default=2)
+    tune_p.add_argument("--dropout", type=float, default=0.2)
+    tune_p.add_argument("--bidirectional", action="store_true")
+    tune_p.add_argument("--epochs", type=int, default=40)
+    tune_p.add_argument("--batch-size", type=int, default=128)
+    tune_p.add_argument("--lr", type=float, default=1e-3)
+    tune_p.add_argument("--sample-weights", action="store_true")
+    tune_p.add_argument("--seed", type=int, default=0)
+    tune_p.add_argument("--folds", type=int, default=5)
+    tune_p.add_argument("--cv-mode", choices=("rolling", "anchored"), default="rolling")
+    tune_p.add_argument("--train-days", type=float, default=365.0)
+    tune_p.add_argument("--val-days", type=float, default=45.0)
+    tune_p.add_argument("--test-days", type=float, default=45.0)
+    tune_p.add_argument("--step-days", type=float, help="origin step (default: test-days)")
+    tune_p.add_argument("--fee-bps", type=float, default=0.0)
+    tune_p.add_argument("--spread-bps", type=float, default=0.0)
+    tune_p.add_argument("--slippage-bps", type=float, default=0.0)
+    tune_p.add_argument("--allocator", default="equal-weight")
+    tune_p.add_argument("--leverage", type=float, default=1.0)
+    tune_p.add_argument("--threshold", type=float, default=0.15)
+    tune_p.add_argument("--on-no-signal", choices=("hold", "flat"), default="hold")
+    tune_p.add_argument(
+        "--grid",
+        action="append",
+        required=True,
+        metavar="KEY=v1,v2",
+        help="field to sweep, e.g. --grid window=16,32 --grid stop=0.004,0.008",
+    )
+    tune_p.add_argument("--top", type=int, default=5, help="configs to keep in report['top']")
+    tune_p.add_argument("--out", help="also write the full JSON report here")
+
     models_p = sub.add_parser("models", help="browse the trained-model registry")
     models_sub = models_p.add_subparsers(dest="models_command", required=True)
     models_sub.add_parser("list", help="every registered model")
@@ -1002,6 +1151,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_cmd_labels(settings, args))
         elif args.command == "train":
             return asyncio.run(_cmd_train(settings, args))
+        elif args.command == "tune":
+            return asyncio.run(_cmd_tune(settings, args))
         elif args.command == "models":
             if args.models_command == "list":
                 return _cmd_models_list(settings)

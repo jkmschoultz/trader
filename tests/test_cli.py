@@ -314,6 +314,44 @@ def test_train_requires_the_split_dates():
     assert args.epochs == 40
 
 
+def test_tune_parses_grid_and_cv_flags():
+    from trader.cli import _parse_grid
+
+    args = _build_parser().parse_args(
+        [
+            "tune",
+            "--symbol",
+            "US500",
+            "--asset-type",
+            "CfdOnIndex",
+            "--horizon",
+            "15m",
+            "--feature-set",
+            "mtf_v1",
+            "--context",
+            "1h,4h",
+            "--grid",
+            "window=16,32",
+            "--grid",
+            "stop=0.004,0.008",
+            "--folds",
+            "4",
+            "--fee-bps",
+            "0.2",
+            "--out",
+            "state/sweep.json",
+        ]
+    )
+    assert args.grid == ["window=16,32", "stop=0.004,0.008"]
+    assert args.folds == 4 and args.cv_mode == "rolling"
+    assert _parse_grid(args.grid) == {"window": [16, 32], "stop": [0.004, 0.008]}
+
+
+def test_tune_requires_a_grid():
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["tune", "--symbol", "X"])
+
+
 def test_models_needs_a_subcommand():
     with pytest.raises(SystemExit):
         _build_parser().parse_args(["models"])
@@ -372,3 +410,57 @@ def test_train_golden_run_registers_a_model(capsys, monkeypatch, tmp_path, seed_
 
     assert main(["models", "list"]) == 0
     assert "lstm-" in capsys.readouterr().out
+
+
+@pytest.mark.slow
+def test_tune_golden_run_prints_a_ranked_table(capsys, monkeypatch, tmp_path, seed_trainable_lake):
+    pytest.importorskip("torch")
+    seed_trainable_lake(tmp_path, bars=4000)
+    monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path))
+    out_path = tmp_path / "sweep.json"
+
+    code = main(
+        [
+            "tune",
+            "--symbol",
+            "X",
+            "--uic",
+            "211",
+            "--asset-type",
+            "Stock",
+            "--horizon",
+            "5m",
+            "--stop",
+            "0.01",
+            "--take",
+            "0.01",
+            "--max-bars",
+            "6",
+            "--window",
+            "8",
+            "--hidden",
+            "8",
+            "--layers",
+            "1",
+            "--epochs",
+            "2",
+            "--batch-size",
+            "16",
+            "--folds",
+            "2",
+            "--train-days",
+            "8",
+            "--val-days",
+            "2",
+            "--test-days",
+            "1.5",
+            "--grid",
+            "threshold=0.0,0.3",
+            "--out",
+            str(out_path),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Tuning sweep: 2 configs" in out
+    assert out_path.is_file()

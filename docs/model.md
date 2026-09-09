@@ -39,8 +39,35 @@ max_bars)` returns boolean `(train, val, test)` masks over `t`:
 - **embargo** — drop samples in the `embargo_bars` band immediately before each
   boundary. `run_training` defaults this to `window + max_bars`.
 
-One split, not walk-forward CV — the `SplitSpec` shape (two dates) extends to a
-list of folds later without touching callers.
+`SplitSpec` also carries an optional `test_end` (right-bound the test set, with a
+matching right-side purge) and `train_start` (a rolling, fixed-width train
+window instead of an anchored one). `run_training` uses neither — they exist for
+walk-forward.
+
+## Walk-forward CV and the sweep
+
+`walk_forward_splits(t, *, n_folds, train_days, val_days, test_days, embargo_bars,
+mode, step_days)` returns `n_folds` chronological `SplitSpec`s over the span of
+`t`: each fold is `train_days` → `val_days` → `test_days`, the origin advancing by
+`step_days` (default `test_days`, so test windows tile without overlap).
+`mode="rolling"` fixes the train width; `"anchored"` lets it expand. It raises if
+the data span cannot fit the folds.
+
+`run_cv(settings, spec, cv)` (`trader.service.training`) builds the
+`SequenceBundle` **once** (features and labels do not depend on the cuts), then
+per fold: `time_split` → fit the scaler on that fold's train → `train_model` →
+**run the held-out window through a real `bt.run`** with a realistic `CostModel`.
+It aggregates median / mean / std of Sharpe, return, turnover, hit rate and
+profit factor across folds, and counts `folds_sharpe_gt_0_5`. Classification
+accuracy is not the selection metric — out-of-sample Sharpe is.
+
+`run_tuning(settings, TuningSpec)` (`trader.service.tuning`) sweeps a `grid` of
+`TrainingSpec` / `CVConfig` fields: the cartesian product, each combo through
+`run_cv`, ranked by median OOS Sharpe (tie-break lower turnover). A per-config
+failure is an error row, not fatal. `build_report` / `render` / `save_report`
+mirror `trader.data.depth` — a JSON-safe dict, a terminal table, a file under
+`state/`. Driven by `trader tune --symbol … --grid window=16,32 --grid
+stop=0.004,0.008 --folds 5` and `POST /api/tuning` (a `kind="tuning"` job).
 
 ## The model
 
@@ -97,9 +124,12 @@ LSTM evaluates through the existing `POST /api/backtests` /
 `settings.models_dir` into any strategy whose `__init__` accepts it, so the
 caller never has to spell out where the registry lives.
 
-Known cost: `on_bar` recomputes features over the whole `ctx.history` slice every
-bar — the same O(n) per-bar cost `docs/backtest.md` flags for the engine. An
-incremental feature buffer is the follow-up if a long 1-minute run needs it.
+`on_bar` recomputes features from a **bounded tail** of `ctx.history` —
+`warmup + _TAIL_PAD * context_ratio` bars — not the whole slice, so a backtest is
+O(N) rather than O(N²). Features are causal, so the retained `window` rows match a
+full-history compute once the EMAs have burned in (`< 1e-5`). Deep context
+horizons still inflate `warmup` itself; an engine-level precompute is the
+follow-up there.
 
 ## End to end
 
@@ -111,6 +141,10 @@ trader train  --symbol AAPL:xnas --asset-type Stock --horizon 5m --context 15m,1
               --window 32 --stop 0.005 --take 0.01 --max-bars 24 --train-end 2025-04-01 --val-end 2025-06-01
 trader models list
 trader backtest --symbol AAPL:xnas --asset-type Stock --strategy lstm --param model=<id> --horizon 5m --since 60d
+
+# or sweep configs by walk-forward CV instead of a single train:
+trader tune --symbol AAPL:xnas --asset-type Stock --horizon 15m --context 1h,4h --feature-set mtf_v1 \
+            --grid window=16,32 --grid stop=0.004,0.008 --folds 5 --fee-bps 0.2 --spread-bps 1.0 --out state/sweep.json
 ```
 
 The API mirrors this: `POST /api/training` (a job on the same store as
