@@ -111,3 +111,35 @@ async def test_torch_missing_is_an_invalid_request(trainable_settings, monkeypat
 def test_spec_rejects_val_end_before_train_end():
     with pytest.raises(ValueError, match="val_end"):
         _spec(train_end="2024-02-01", val_end="2024-01-01")
+
+
+@pytest.fixture
+def cv_settings(tmp_path, seed_trainable_lake) -> Settings:
+    seed_trainable_lake(tmp_path, bars=4000)  # ~13.9 days of 5m bars
+    return Settings(data_dir=tmp_path, state_dir=tmp_path / "state")
+
+
+async def test_run_cv_walks_forward_and_backtests_each_fold(cv_settings):
+    from trader.service.training import CVConfig, run_cv
+
+    seen: list[float] = []
+    cv = CVConfig(folds=2, train_days=8, val_days=2, test_days=1.5, fee_bps=0.2, spread_bps=1.0)
+    out = await run_cv(cv_settings, _spec(train_end=None, val_end=None), cv, progress=seen.append)
+
+    assert len(out["folds"]) == 2
+    for f in out["folds"]:
+        assert f["test_end"] and f["fold"] in (1, 2)
+        assert {"sharpe", "total_return", "turnover"} <= set(f["metrics"])
+    agg = out["aggregate"]
+    assert agg["n_folds"] == 2
+    assert isinstance(agg["folds_sharpe_gt_0_5"], int)
+    assert set(agg["sharpe"]) == {"median", "mean", "std"}
+    assert seen and seen[-1] == pytest.approx(1.0)
+
+
+async def test_run_cv_rejects_a_span_too_short_for_the_folds(cv_settings):
+    from trader.service.training import CVConfig, run_cv
+
+    cv = CVConfig(folds=20, train_days=8, val_days=2, test_days=2)
+    with pytest.raises(InvalidRequest, match="not enough"):
+        await run_cv(cv_settings, _spec(train_end=None, val_end=None), cv)

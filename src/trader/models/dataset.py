@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,7 @@ __all__ = [
     "WindowSpec",
     "build_bundle",
     "time_split",
+    "walk_forward_splits",
 ]
 
 _NS_PER_MIN = 60 * 1_000_000_000
@@ -71,15 +73,28 @@ class SequenceBundle:
 
 @dataclass(frozen=True)
 class SplitSpec:
-    """Where to cut train / val / test, and how wide the safety band is."""
+    """Where to cut train / val / test, and how wide the safety band is.
+
+    ``test_end`` bounds the test window on the right -- required for
+    walk-forward, where a later fold reuses this fold's test period for
+    training. Left ``None`` the test set runs to the end of the data.
+    ``train_start`` bounds it on the left, for a rolling (fixed-width) train
+    window; ``None`` means train is everything up to ``train_end`` (anchored).
+    """
 
     train_end: datetime
     val_end: datetime
     embargo_bars: int | None = None
+    test_end: datetime | None = None
+    train_start: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.val_end <= self.train_end:
             raise ValueError("val_end must be after train_end")
+        if self.test_end is not None and self.test_end <= self.val_end:
+            raise ValueError("test_end must be after val_end")
+        if self.train_start is not None and self.train_start >= self.train_end:
+            raise ValueError("train_start must be before train_end")
 
 
 def build_bundle(
@@ -193,11 +208,71 @@ def time_split(
     embargo_ns = np.int64(embargo_bars * base_horizon * _NS_PER_MIN)
 
     in_train = t < train_end
+    if split.train_start is not None:
+        in_train = in_train & (t >= np.int64(pd.Timestamp(split.train_start).value))
     in_val = (t >= train_end) & (t < val_end)
     in_test = t >= val_end
 
     train_mask = in_train & (t + purge_ns < train_end) & (t < train_end - embargo_ns)
     val_mask = in_val & (t + purge_ns < val_end) & (t < val_end - embargo_ns)
     test_mask = in_test
+    if split.test_end is not None:
+        test_end = np.int64(pd.Timestamp(split.test_end).value)
+        # right-purge the test set too: a label window that reaches past
+        # test_end depends on bars a later fold trains on.
+        test_mask = test_mask & (t < test_end) & (t + purge_ns < test_end)
 
     return train_mask, val_mask, test_mask
+
+
+def walk_forward_splits(
+    t: np.ndarray,
+    *,
+    n_folds: int,
+    train_days: float,
+    val_days: float,
+    test_days: float,
+    embargo_bars: int | None = None,
+    mode: Literal["rolling", "anchored"] = "rolling",
+    step_days: float | None = None,
+) -> list[SplitSpec]:
+    """``n_folds`` chronological ``SplitSpec``s over the span of ``t``.
+
+    ``t`` is the sorted int64-ns decision-bar array (``bundle.t``). Each fold is
+    ``train_days`` of training, then ``val_days``, then ``test_days``; the origin
+    advances by ``step_days`` (default: ``test_days``, so test windows tile the
+    tail without overlap). ``mode="rolling"`` keeps the train window a fixed
+    width; ``"anchored"`` starts every train window at the first sample
+    (expanding). Raises ``ValueError`` if the data span cannot fit ``n_folds``.
+    """
+    if n_folds < 1:
+        raise ValueError(f"n_folds must be >= 1, got {n_folds}")
+    start = pd.Timestamp(int(np.min(t)))
+    end = pd.Timestamp(int(np.max(t)))
+    step = pd.Timedelta(days=step_days if step_days is not None else test_days)
+    train_span = pd.Timedelta(days=train_days)
+    val_span = pd.Timedelta(days=val_days)
+    test_span = pd.Timedelta(days=test_days)
+
+    splits: list[SplitSpec] = []
+    for i in range(n_folds):
+        train_end = start + train_span + i * step
+        val_end = train_end + val_span
+        test_end = val_end + test_span
+        if test_end > end:
+            raise ValueError(
+                f"data spans {start:%Y-%m-%d}..{end:%Y-%m-%d}; not enough for "
+                f"{n_folds} folds of {train_days}+{val_days}+{test_days}d "
+                f"stepped {step.days}d (fold {i + 1} needs data to {test_end:%Y-%m-%d})"
+            )
+        train_start = None if mode == "anchored" else train_end - train_span
+        splits.append(
+            SplitSpec(
+                train_end=train_end.to_pydatetime(),
+                val_end=val_end.to_pydatetime(),
+                embargo_bars=embargo_bars,
+                test_end=test_end.to_pydatetime(),
+                train_start=train_start.to_pydatetime() if train_start is not None else None,
+            )
+        )
+    return splits

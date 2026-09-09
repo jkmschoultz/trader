@@ -175,6 +175,8 @@ class ModelRegistry:
             "train_end": split.train_end.isoformat(),
             "val_end": split.val_end.isoformat(),
             "embargo_bars": split.embargo_bars,
+            "test_end": split.test_end.isoformat() if split.test_end else None,
+            "train_start": split.train_start.isoformat() if split.train_start else None,
         }
         created_at = datetime.now(UTC).isoformat()
         digest = _digest(feature_spec.digest(), barriers, window, hyperparameters, split_dict)

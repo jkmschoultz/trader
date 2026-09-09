@@ -6,7 +6,13 @@ import pandas as pd
 import pytest
 
 from trader.labels.triple_barrier import LabelConfig
-from trader.models.dataset import SplitSpec, WindowSpec, build_bundle, time_split
+from trader.models.dataset import (
+    SplitSpec,
+    WindowSpec,
+    build_bundle,
+    time_split,
+    walk_forward_splits,
+)
 
 MAX_BARS = 12
 LABEL = LabelConfig(stop=0.01, take=0.01, max_bars=MAX_BARS)
@@ -82,3 +88,68 @@ def test_val_end_must_be_after_train_end():
             train_end=pd.Timestamp("2024-06-01").to_pydatetime(),
             val_end=pd.Timestamp("2024-05-01").to_pydatetime(),
         )
+
+
+def test_test_end_bounds_and_right_purges_the_test_set(bars):
+    bundle = _bundle(bars)
+    t = bundle.t
+    train_end = pd.Timestamp(t[int(len(t) * 0.5)]).to_pydatetime()
+    val_end = pd.Timestamp(t[int(len(t) * 0.65)]).to_pydatetime()
+    test_end = pd.Timestamp(t[int(len(t) * 0.85)]).to_pydatetime()
+
+    _, _, te = time_split(
+        bundle,
+        SplitSpec(train_end, val_end, embargo_bars=0, test_end=test_end),
+        base_horizon=5,
+        max_bars=MAX_BARS,
+    )
+    purge_ns = (1 + MAX_BARS) * 5 * 60 * 1_000_000_000
+    assert (bundle.t[te] >= pd.Timestamp(val_end).value).all()
+    assert (bundle.t[te] + purge_ns < pd.Timestamp(test_end).value).all()
+
+
+def test_train_start_makes_a_rolling_window(bars):
+    bundle = _bundle(bars)
+    t = bundle.t
+    train_start = pd.Timestamp(t[int(len(t) * 0.2)]).to_pydatetime()
+    train_end = pd.Timestamp(t[int(len(t) * 0.6)]).to_pydatetime()
+    val_end = pd.Timestamp(t[int(len(t) * 0.8)]).to_pydatetime()
+
+    tr, _, _ = time_split(
+        bundle,
+        SplitSpec(train_end, val_end, embargo_bars=0, train_start=train_start),
+        base_horizon=5,
+        max_bars=MAX_BARS,
+    )
+    assert (bundle.t[tr] >= pd.Timestamp(train_start).value).all()
+
+
+def test_walk_forward_splits_tile_the_tail(bars):
+    bundle = _bundle(bars)
+    span_days = (bundle.t.max() - bundle.t.min()) / 1e9 / 86400
+    each = span_days / 8  # 3 folds: 3*each train + each val + each test, stepped each
+
+    splits = walk_forward_splits(
+        bundle.t,
+        n_folds=3,
+        train_days=each * 3,
+        val_days=each,
+        test_days=each,
+        embargo_bars=10,
+        mode="rolling",
+    )
+    assert len(splits) == 3
+    # ordered, non-overlapping test windows, each a fixed-width rolling train
+    for a, b in zip(splits, splits[1:], strict=False):
+        assert b.train_end > a.train_end
+        assert a.test_end <= b.val_end
+    for s in splits:
+        assert s.train_start is not None and s.test_end is not None
+        width = s.train_end - s.train_start
+        assert abs(width - (splits[0].train_end - splits[0].train_start)) < pd.Timedelta(minutes=1)
+
+
+def test_walk_forward_splits_raises_when_span_too_short(bars):
+    bundle = _bundle(bars)
+    with pytest.raises(ValueError, match="not enough"):
+        walk_forward_splits(bundle.t, n_folds=50, train_days=365, val_days=60, test_days=60)
