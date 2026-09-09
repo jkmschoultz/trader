@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { api } from "./api/client";
+import { api, ApiError } from "./api/client";
 import type { Job } from "./api/types";
+
+const isNotFound = (e: unknown): boolean => e instanceof ApiError && e.status === 404;
 
 export function useAuthStatus() {
   return useQuery({ queryKey: ["auth"], queryFn: api.authStatus, refetchInterval: 60_000 });
@@ -67,6 +69,21 @@ export function useStickyJobId(key: string) {
     },
     [key],
   );
+
+  // A restored id from a previous server process is dead weight: validate it
+  // once and drop it if the server 404s, so the view doesn't sit on a phantom
+  // "running" after a restart.
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    api.job(jobId).catch((e) => {
+      if (!cancelled && isNotFound(e)) setJobId(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, setJobId]);
+
   return [jobId, setJobId] as const;
 }
 
@@ -116,8 +133,13 @@ export function useJob(jobId: string | null): Job | null {
           if (cancelled) return;
           setJob(snap);
           if (snap.status === "done" || snap.status === "error") stopPolling();
-        } catch {
-          /* keep trying */
+        } catch (e) {
+          // The server no longer knows this job (restart / eviction). Stop
+          // rather than hammer a 404 forever, and drop the stale snapshot.
+          if (isNotFound(e)) {
+            stopPolling();
+            if (!cancelled) setJob(null);
+          }
         }
       }, 1000);
     };
@@ -145,7 +167,16 @@ export function useJob(jobId: string | null): Job | null {
     }
 
     // one immediate fetch so the UI is not blank while the stream connects
-    api.job(jobId).then((snap) => !cancelled && setJob(snap)).catch(() => {});
+    api
+      .job(jobId)
+      .then((snap) => !cancelled && setJob(snap))
+      .catch((e) => {
+        if (isNotFound(e)) {
+          source?.close();
+          stopPolling();
+          if (!cancelled) setJob(null);
+        }
+      });
 
     return () => {
       cancelled = true;
