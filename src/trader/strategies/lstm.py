@@ -20,6 +20,16 @@ from typing import Literal
 from trader.strategies.base import BarContext, Decision, Flat, Hold, InstrumentStrategy, Target
 from trader.strategies.registry import register
 
+# ``on_bar`` only needs the last ``window`` feature rows, and every indicator's
+# lookback is bounded by ``FeatureSpec.warmup``. Recomputing over the whole
+# ``ctx.history`` each bar is what makes an LSTM backtest O(N^2); slicing to a
+# bounded tail makes it O(N) for ``price_v1`` and shallow context sets. The pad
+# past ``warmup`` is EWM burn-in headroom -- an EMA still carries a little of its
+# seed for many spans -- scaled per call by the coarsest context ratio, since a
+# context EMA burns in over that many base bars. Deep context horizons make
+# ``warmup`` itself large; an engine-level precompute is the follow-up there.
+_TAIL_PAD = 300
+
 
 @register("lstm")
 class LSTMStrategy(InstrumentStrategy):
@@ -66,6 +76,10 @@ class LSTMStrategy(InstrumentStrategy):
         self._window = int(self._info.window)
         self.warmup = self._window + self._spec.warmup
 
+        base = self._spec.base_horizon
+        ratio = max((-(-h // base) for h in self._spec.context_horizons), default=1)
+        self._tail = self.warmup + _TAIL_PAD * ratio
+
         self._threshold = float(threshold)
         self._weight = float(weight)
         self._flat_on_no_signal = on_no_signal == "flat"
@@ -80,7 +94,8 @@ class LSTMStrategy(InstrumentStrategy):
 
         from trader.features.pipeline import compute_feature_frame
 
-        features, _ = compute_feature_frame(ctx.history, spec=self._spec, session=ctx.session)
+        tail = ctx.history.iloc[-self._tail :]
+        features, _ = compute_feature_frame(tail, spec=self._spec, session=ctx.session)
         window = features.to_numpy(dtype="float32")[-self._window :]
         if window.shape[0] < self._window or np.isnan(window).any():
             return Hold()

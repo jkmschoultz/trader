@@ -72,6 +72,32 @@ def test_volume_less_bars_do_not_produce_all_nan_columns(make_bars):
     assert warm["vwap_dist"].notna().all()  # unweighted fallback
 
 
+def test_tail_slice_reproduces_the_last_rows(make_bars):
+    """``LSTMStrategy.on_bar`` computes features on a bounded tail of history, not
+    the whole thing (that is the O(N^2) fix). The retained rows must match a
+    full-history compute to well under float tolerance -- the tail keeps
+    ``warmup + _TAIL_PAD * context_ratio`` bars, enough EMA burn-in that the
+    residual is numerical noise."""
+    from trader.strategies.lstm import _TAIL_PAD
+
+    bars = make_bars(6000, seed=7)
+    window = 32
+
+    for ctx in ([], [15, 60]):
+        fs = "mtf_v1" if ctx else "price_v1"
+        full, spec = compute_feature_frame(
+            bars, feature_set=fs, base_horizon=5, context_horizons=ctx
+        )
+        ratio = max((-(-h // 5) for h in spec.context_horizons), default=1)
+        tail = bars.iloc[-(window + spec.warmup + _TAIL_PAD * ratio) :]
+        sliced, _ = compute_feature_frame(tail, spec=spec)
+
+        a = full.to_numpy("float64")[-window:]
+        b = sliced.to_numpy("float64")[-window:]
+        assert pd.notna(a).all() and pd.notna(b).all()
+        assert abs(b - a).max() < 1e-5
+
+
 def test_digest_changes_with_the_spec(make_bars):
     _, price = compute_feature_frame(make_bars(120), feature_set="price_v1", base_horizon=5)
     _, mtf = compute_feature_frame(
