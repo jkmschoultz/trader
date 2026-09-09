@@ -18,6 +18,7 @@ from trader.api.routes import (
     jobs,
     lake,
     training,
+    tuning,
 )
 from trader.config import Settings, get_settings
 
@@ -46,7 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    for module in (health, auth, catalog, lake, instruments, backtests, training, jobs):
+    for module in (health, auth, catalog, lake, instruments, backtests, training, tuning, jobs):
         app.include_router(module.router, prefix="/api")
 
     # Anything under /api that no router matched is a genuine 404. Without this,
