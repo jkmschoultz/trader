@@ -60,6 +60,18 @@ def test_unknown_feature_set_raises(make_bars):
         compute_feature_frame(make_bars(50), feature_set="nope", base_horizon=5)
 
 
+def test_volume_less_bars_do_not_produce_all_nan_columns(make_bars):
+    """FX / quote-driven CFDs carry no volume; features must still be usable."""
+    bars = make_bars(400)
+    bars["volume"] = float("nan")
+
+    feats, spec = compute_feature_frame(bars, feature_set="price_v1", base_horizon=5)
+    warm = feats.iloc[spec.warmup + 5 :]
+    assert not warm.isna().all().any(), "an all-NaN feature column would drop every window"
+    assert (warm["volz"] == 0.0).all()  # neutral, not NaN
+    assert warm["vwap_dist"].notna().all()  # unweighted fallback
+
+
 def test_digest_changes_with_the_spec(make_bars):
     _, price = compute_feature_frame(make_bars(120), feature_set="price_v1", base_horizon=5)
     _, mtf = compute_feature_frame(

@@ -53,9 +53,16 @@ def _session_timezone(session) -> tzinfo:
 
 
 def _price_block(bars: pd.DataFrame, spec: FeatureSpec, session) -> pd.DataFrame:
-    """The single-timeframe feature columns, indexed by bar ``time``."""
+    """The single-timeframe feature columns, indexed by bar ``time``.
+
+    Quote-driven instruments (FX, some CFDs) carry no volume. The two
+    volume-dependent columns degrade rather than turn the whole row to NaN:
+    ``volz`` becomes 0 (no information) and ``vwap_dist`` falls back to an
+    unweighted running mean of the typical price.
+    """
     close = bars["close"]
     volume = bars["volume"]
+    has_volume = bool(volume.notna().any())
     out: dict[str, pd.Series] = {}
 
     for n in spec.returns:
@@ -70,7 +77,11 @@ def _price_block(bars: pd.DataFrame, spec: FeatureSpec, session) -> pd.DataFrame
     out["macd_hist"] = hist
     out["atr_pct"] = ind.atr(bars, spec.atr_window) / close
     out["range_pct"] = ind.range_pct(bars)
-    out["volz"] = ind.volume_zscore(volume, spec.volz_window)
+    out["volz"] = (
+        ind.volume_zscore(volume, spec.volz_window).fillna(0.0)
+        if has_volume
+        else pd.Series(0.0, index=close.index)
+    )
 
     tz = _session_timezone(session)
     local = pd.DatetimeIndex(bars["time"]).tz_convert(tz)
@@ -78,12 +89,11 @@ def _price_block(bars: pd.DataFrame, spec: FeatureSpec, session) -> pd.DataFrame
     minutes = local.hour * 60 + local.minute
 
     typical = (bars["high"] + bars["low"] + bars["close"]) / 3.0
-    frame = pd.DataFrame(
-        {"tpv": (typical * volume).to_numpy(), "vol": volume.to_numpy(), "day": day}
-    )
+    weight = volume if has_volume else pd.Series(1.0, index=close.index)
+    frame = pd.DataFrame({"tpv": (typical * weight).to_numpy(), "w": weight.to_numpy(), "day": day})
     cum_tpv = frame.groupby("day")["tpv"].cumsum()
-    cum_vol = frame.groupby("day")["vol"].cumsum()
-    vwap = pd.Series((cum_tpv / cum_vol).to_numpy(), index=close.index)
+    cum_w = frame.groupby("day")["w"].cumsum()
+    vwap = pd.Series((cum_tpv / cum_w).to_numpy(), index=close.index)
     out["vwap_dist"] = close / vwap - 1.0
 
     prev_close = close.shift(1)
