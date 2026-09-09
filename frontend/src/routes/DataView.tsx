@@ -6,7 +6,7 @@ import { DEFAULT_EXCHANGE, EXCHANGES } from "../exchanges";
 import { CheckboxDropdown } from "../components/CheckboxDropdown";
 import { PriceChart } from "../components/PriceChart";
 import { JobProgress } from "../components/JobProgress";
-import { useBars, useJob, useSeries } from "../hooks";
+import { useBars, useJob, useSeries, useStickyJobId } from "../hooks";
 import type { SeriesInfo } from "../api/types";
 
 const fmt = (s: string) => s.replace("T", " ").slice(0, 16);
@@ -29,7 +29,7 @@ function BackfillPanel({ onDone }: { onDone: () => void }) {
   const [assetType, setAssetType] = useState(DEFAULT_ASSET_TYPE);
   const [horizons, setHorizons] = useState<string[]>(["1m", "5m"]);
   const [since, setSince] = useState("90d");
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobId, setJobId] = useStickyJobId("job:backfill");
   const [error, setError] = useState<string | null>(null);
   const job = useJob(jobId);
 

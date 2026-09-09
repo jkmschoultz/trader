@@ -272,3 +272,83 @@ export interface TrainingResult {
   class_distribution: Record<string, Record<string, number>>;
   report: TrainReport;
 }
+
+// ---- tuning sweep (src/trader/service/tuning) ----
+
+export type TuningBase = Partial<Omit<TrainingSpec, "train_end" | "val_end">> & {
+  symbols: string[];
+};
+
+export interface CVConfigSpec {
+  folds?: number;
+  mode?: "rolling" | "anchored";
+  train_days: number;
+  val_days: number;
+  test_days: number;
+  step_days?: number | null;
+  fee_bps?: number;
+  spread_bps?: number;
+  slippage_bps?: number;
+  allocator?: string;
+  leverage?: number;
+  threshold?: number;
+  on_no_signal?: "hold" | "flat";
+}
+
+export type GridValue = number | string | boolean;
+
+export interface TuningSpec {
+  base: TuningBase;
+  cv: CVConfigSpec;
+  grid: Record<string, GridValue[]>;
+  top_k?: number;
+  max_workers?: number;
+}
+
+export interface Stat {
+  median: number | null;
+  mean: number | null;
+  std: number | null;
+}
+
+export interface FoldMetrics {
+  fold: number;
+  train_end: string;
+  val_end: string;
+  test_end: string | null;
+  val_macro_f1: number | null;
+  test_macro_f1: number | null;
+  metrics: Metrics;
+}
+
+export interface TuningRow {
+  config: Record<string, GridValue>;
+  rank: number | null;
+  error?: string;
+  aggregate?: {
+    n_folds: number;
+    folds_sharpe_gt_0_5: number;
+    worst_fold_sharpe: number;
+    sharpe: Stat;
+    total_return: Stat;
+    turnover: Stat;
+    hit_rate: Stat;
+    profit_factor: Stat;
+  };
+  folds?: FoldMetrics[];
+}
+
+export interface TuningReport {
+  measured_at: string;
+  finished_at: string;
+  symbols: string[];
+  horizon: number;
+  feature_set: string;
+  grid: Record<string, GridValue[]>;
+  n_configs: number;
+  n_errored: number;
+  cv: Record<string, unknown>;
+  results: TuningRow[];
+  top: TuningRow[];
+  report_path?: string;
+}

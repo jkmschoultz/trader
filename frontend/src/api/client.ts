@@ -11,6 +11,7 @@ import type {
   SeriesInfo,
   StrategyInfo,
   TrainingSpec,
+  TuningSpec,
 } from "./types";
 
 export class ApiError extends Error {
@@ -95,6 +96,12 @@ export const api = {
     }),
   models: () => request<ModelSummary[]>("/models"),
   model: (id: string) => request<ModelInfo>(`/models/${id}`),
+
+  submitTuning: (spec: TuningSpec) =>
+    request<{ job_id: string }>("/tuning", {
+      method: "POST",
+      body: JSON.stringify(spec),
+    }),
 
   job: (id: string) => request<Job>(`/jobs/${id}`),
   jobs: () => request<Job[]>("/jobs"),

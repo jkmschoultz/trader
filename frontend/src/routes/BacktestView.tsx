@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "../api/client";
 import { StrategyForm } from "../components/StrategyForm";
 import { JobProgress } from "../components/JobProgress";
-import { useJob } from "../hooks";
+import { useJob, useStickyJobId } from "../hooks";
 import type { BacktestResult, BacktestSpec, Job, SeriesNotStoredData } from "../api/types";
 import { ResultsView } from "./ResultsView";
 
@@ -70,7 +70,7 @@ function FetchMissing({
 }
 
 export function BacktestView() {
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobId, setJobId] = useStickyJobId("job:backtest");
   const [lastSpec, setLastSpec] = useState<BacktestSpec | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const job = useJob(jobId);

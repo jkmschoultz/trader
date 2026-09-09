@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { api, ApiError } from "../api/client";
 import { JobProgress } from "../components/JobProgress";
 import { ASSET_TYPES, DEFAULT_ASSET_TYPE } from "../assetTypes";
 import { DEFAULT_EXCHANGE, EXCHANGES } from "../exchanges";
-import { useFeatureSets, useJob, useModels } from "../hooks";
+import { useFeatureSets, useJob, useModel, useModels, useStickyJobId } from "../hooks";
 import type { ModelSummary, TrainingResult, TrainingSpec } from "../api/types";
 
 const field =
@@ -52,7 +52,60 @@ function Confusion({ title, matrix }: { title: string; matrix: number[][] }) {
   );
 }
 
+function ModelDetail({ id }: { id: string }) {
+  const { data, isLoading, error } = useModel(id);
+  if (isLoading) return <p className="text-xs text-slate-400">loading…</p>;
+  if (error || !data) return <p className="text-xs text-red-600">could not load {id}</p>;
+
+  const dist = data.class_distribution ?? {};
+  return (
+    <div className="space-y-3 py-1 text-xs">
+      <div className="flex flex-wrap gap-x-6 gap-y-1 font-mono tabular-nums">
+        {Object.entries(data.metrics).map(([k, v]) => (
+          <span key={k}>
+            <span className="text-slate-400">{k} </span>
+            {typeof v === "number" ? v.toFixed(4) : String(v)}
+          </span>
+        ))}
+      </div>
+      {Object.keys(dist).length > 0 && (
+        <table className="font-mono tabular-nums">
+          <thead className="text-slate-400">
+            <tr>
+              <th className="pr-3 text-left">split</th>
+              <th className="pr-3 text-right">down</th>
+              <th className="pr-3 text-right">flat</th>
+              <th className="pr-3 text-right">up</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(dist).map(([split, c]) => (
+              <tr key={split}>
+                <td className="pr-3 text-slate-400">{split}</td>
+                <td className="pr-3 text-right">{c.down ?? "–"}</td>
+                <td className="pr-3 text-right">{c.flat ?? "–"}</td>
+                <td className="pr-3 text-right">{c.up ?? "–"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="flex flex-wrap gap-x-6 gap-y-1 text-slate-500">
+        <span>symbols: {data.symbols.join(", ") || "–"}</span>
+        <span>train→{String(data.split.train_end ?? "?").slice(0, 10)}</span>
+        <span>val→{String(data.split.val_end ?? "?").slice(0, 10)}</span>
+        <span>
+          net: h{String(data.hyperparameters.hidden)}×{String(data.hyperparameters.layers)}
+        </span>
+        <span>epochs: {String(data.hyperparameters.epochs ?? "–")}</span>
+        <span>lr: {String(data.hyperparameters.lr ?? "–")}</span>
+      </div>
+    </div>
+  );
+}
+
 function ModelsTable({ models }: { models: ModelSummary[] }) {
+  const [open, setOpen] = useState<string | null>(null);
   if (models.length === 0) {
     return <p className="text-sm text-slate-400">No models trained yet.</p>;
   }
@@ -73,20 +126,35 @@ function ModelsTable({ models }: { models: ModelSummary[] }) {
         <tbody className="font-mono text-xs">
           {models.map((m) => {
             const ctx = m.context_horizons.length ? `+${m.context_horizons.join(",")}` : "";
+            const isOpen = open === m.id;
             return (
-              <tr key={m.id} className="border-t border-slate-100 dark:border-slate-800">
-                <td className="py-1 pr-4">{m.id}</td>
-                <td className="py-1 pr-4">{m.feature_set}</td>
-                <td className="py-1 pr-4">
-                  {m.horizon}m{ctx}
-                </td>
-                <td className="py-1 pr-4">{m.window}</td>
-                <td className="py-1 pr-4">
-                  {m.barriers.stop ?? "–"}/{m.barriers.take ?? "–"}/{m.barriers.max_bars}
-                </td>
-                <td className="py-1 pr-4">{m.metrics.val_macro_f1 ?? "–"}</td>
-                <td className="py-1 pr-4">{m.metrics.test_macro_f1 ?? "–"}</td>
-              </tr>
+              <Fragment key={m.id}>
+                <tr
+                  onClick={() => setOpen(isOpen ? null : m.id)}
+                  className="cursor-pointer border-t border-slate-100 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-900"
+                >
+                  <td className="py-1 pr-4">
+                    {isOpen ? "▾" : "▸"} {m.id}
+                  </td>
+                  <td className="py-1 pr-4">{m.feature_set}</td>
+                  <td className="py-1 pr-4">
+                    {m.horizon}m{ctx}
+                  </td>
+                  <td className="py-1 pr-4">{m.window}</td>
+                  <td className="py-1 pr-4">
+                    {m.barriers.stop ?? "–"}/{m.barriers.take ?? "–"}/{m.barriers.max_bars}
+                  </td>
+                  <td className="py-1 pr-4">{m.metrics.val_macro_f1 ?? "–"}</td>
+                  <td className="py-1 pr-4">{m.metrics.test_macro_f1 ?? "–"}</td>
+                </tr>
+                {isOpen && (
+                  <tr>
+                    <td colSpan={7} className="pb-3">
+                      <ModelDetail id={m.id} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             );
           })}
         </tbody>
@@ -100,7 +168,7 @@ export function TrainView() {
   const models = useModels();
   const queryClient = useQueryClient();
 
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobId, setJobId] = useStickyJobId("job:train");
   const [error, setError] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const job = useJob(jobId);

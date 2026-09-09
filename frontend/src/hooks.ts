@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "./api/client";
@@ -22,6 +22,52 @@ export function useFeatureSets() {
 
 export function useModels() {
   return useQuery({ queryKey: ["models"], queryFn: api.models });
+}
+
+export function useModel(id: string | null) {
+  return useQuery({
+    queryKey: ["model", id],
+    queryFn: () => api.model(id!),
+    enabled: id != null,
+    staleTime: Infinity,
+  });
+}
+
+/**
+ * Every job the server still remembers, polled so it stays live across tab
+ * switches. React Query's cache outlives the components that read it, so an
+ * in-flight backfill / training / sweep keeps showing after you navigate away
+ * and back.
+ */
+export function useJobs() {
+  return useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 2500 });
+}
+
+/**
+ * A job id that survives navigation and reload within the browser session, so a
+ * view re-attaches to the run it kicked off after you come back to it.
+ */
+export function useStickyJobId(key: string) {
+  const [jobId, setJobIdState] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  });
+  const setJobId = useCallback(
+    (id: string | null) => {
+      setJobIdState(id);
+      try {
+        if (id) sessionStorage.setItem(key, id);
+        else sessionStorage.removeItem(key);
+      } catch {
+        /* private mode / disabled storage: fall back to in-memory only */
+      }
+    },
+    [key],
+  );
+  return [jobId, setJobId] as const;
 }
 
 export function useSeries() {

@@ -1,16 +1,19 @@
 import { useState } from "react";
 
+import { ActiveJobs } from "./components/ActiveJobs";
 import { AuthBanner } from "./components/AuthBanner";
 import { DataView } from "./routes/DataView";
 import { BacktestView } from "./routes/BacktestView";
 import { TrainView } from "./routes/TrainView";
+import { TuningView } from "./routes/TuningView";
 
-type Tab = "data" | "backtest" | "train";
+type Tab = "data" | "backtest" | "train" | "tune";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "data", label: "Data" },
   { id: "backtest", label: "Backtest" },
   { id: "train", label: "Train" },
+  { id: "tune", label: "Tune" },
 ];
 
 export default function App() {
@@ -38,10 +41,13 @@ export default function App() {
         </nav>
       </header>
 
+      <ActiveJobs />
+
       <main className="p-4">
         {tab === "data" && <DataView />}
         {tab === "backtest" && <BacktestView />}
         {tab === "train" && <TrainView />}
+        {tab === "tune" && <TuningView />}
       </main>
     </div>
   );
