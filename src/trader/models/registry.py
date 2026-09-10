@@ -13,8 +13,15 @@ One model is a directory under ``data/models/`` (``Settings.models_dir``)::
 the feature spec, barriers, window, and hyperparameters, so two genuinely
 different models never share an id and a re-run of the same recipe is obvious.
 
+A model directory is not LSTM-specific: ``manifest["model_type"]`` is ``"lstm"``
+(torch ``state_dict`` in ``weights.pt``) or ``"gbm"`` (a LightGBM text model in
+``model.txt``), and ``manifest["layout"]`` records whether the features were
+framed as a ``"sequence"`` or flattened to ``"tabular"``. ``load_model``
+dispatches on ``model_type``; ``load_torch`` / ``load_gbm`` are the concrete
+loaders.
+
 Reading (``list`` / ``get``) needs only the ``[data]`` extra -- it parses JSON.
-``save`` and ``load_torch`` need ``[model]``; they import torch lazily.
+``save`` and the loaders need ``[model]``; they import torch / lightgbm lazily.
 """
 
 from __future__ import annotations
@@ -34,17 +41,20 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from trader.features.base import FeatureSpec
     from trader.labels.triple_barrier import LabelConfig
     from trader.models.dataset import SplitSpec
-    from trader.models.lstm import LSTMClassifier, LSTMConfig
+    from trader.models.lstm import LSTMClassifier
+    from trader.models.report import TrainReport
     from trader.models.scaler import StandardScaler
-    from trader.models.training import TrainReport
 
 __all__ = ["ModelInfo", "ModelNotFound", "ModelRegistry"]
 
 _MANIFEST = "manifest.json"
-_WEIGHTS = "weights.pt"
+_WEIGHTS = "weights.pt"  # torch state_dict (model_type="lstm")
+_WEIGHTS_GBM = "model.txt"  # LightGBM native text model (model_type="gbm")
 _SCALER = "scaler.json"
 _FEATURE_SPEC = "feature_spec.json"
 _REPORT = "report.json"
+
+_WEIGHTS_FOR = {"lstm": _WEIGHTS, "gbm": _WEIGHTS_GBM}
 
 
 class ModelNotFound(ServiceError):
@@ -58,6 +68,8 @@ class ModelInfo:
     id: str
     name: str
     created_at: str
+    model_type: str
+    layout: str
     base_horizon: int
     context_horizons: list[int]
     feature_set: str
@@ -78,6 +90,8 @@ class ModelInfo:
             id=manifest["id"],
             name=manifest["name"],
             created_at=manifest["created_at"],
+            model_type=manifest.get("model_type", "lstm"),
+            layout=manifest.get("layout", "sequence"),
             base_horizon=int(manifest["base_horizon"]),
             context_horizons=list(manifest.get("context_horizons", [])),
             feature_set=manifest["feature_set"],
@@ -147,20 +161,31 @@ class ModelRegistry:
         self,
         *,
         name: str,
-        model: LSTMClassifier,
+        model: Any,
         scaler: StandardScaler,
         feature_spec: FeatureSpec,
         label: LabelConfig,
         window: int,
         split: SplitSpec,
-        config: LSTMConfig,
+        config: Any,
         report: TrainReport,
         data_spec: dict,
         optimiser: dict | None = None,
+        model_type: str = "lstm",
+        layout: str = "sequence",
     ) -> ModelInfo:
-        """Write a model directory atomically and return its :class:`ModelInfo`."""
+        """Write a model directory atomically and return its :class:`ModelInfo`.
+
+        ``model_type`` picks the weights format: ``"lstm"`` writes a torch
+        ``state_dict`` to ``weights.pt``; ``"gbm"`` writes a LightGBM text model
+        to ``model.txt``. ``config`` only needs a ``to_dict()``.
+        """
         import numpy as np
-        import torch
+
+        if model_type not in _WEIGHTS_FOR:
+            raise ValueError(
+                f"unknown model_type {model_type!r}; choose one of {list(_WEIGHTS_FOR)}"
+            )
 
         self._root.mkdir(parents=True, exist_ok=True)
 
@@ -179,13 +204,28 @@ class ModelRegistry:
             "train_start": split.train_start.isoformat() if split.train_start else None,
         }
         created_at = datetime.now(UTC).isoformat()
-        digest = _digest(feature_spec.digest(), barriers, window, hyperparameters, split_dict)
+        digest = _digest(
+            model_type, feature_spec.digest(), barriers, window, hyperparameters, split_dict
+        )
         model_id = f"{name}-{datetime.now(UTC):%Y%m%d-%H%M%S}-{digest[:8]}"
+        weights_name = _WEIGHTS_FOR[model_type]
+
+        framework: dict[str, str] = {"numpy": np.__version__}
+        if model_type == "lstm":
+            import torch
+
+            framework["torch"] = torch.__version__
+        else:
+            from trader.models._optional import require_lightgbm
+
+            framework["lightgbm"] = require_lightgbm().__version__
 
         manifest = {
             "id": model_id,
             "name": name,
             "created_at": created_at,
+            "model_type": model_type,
+            "layout": layout,
             "git_commit": _git_commit(),
             "data": data_spec,
             "base_horizon": feature_spec.base_horizon,
@@ -198,9 +238,9 @@ class ModelRegistry:
             "hyperparameters": hyperparameters,
             "metrics": report.metrics,
             "class_distribution": report.class_distribution,
-            "framework": {"torch": torch.__version__, "numpy": np.__version__},
+            "framework": framework,
             "files": {
-                "weights": _WEIGHTS,
+                "weights": weights_name,
                 "scaler": _SCALER,
                 "feature_spec": _FEATURE_SPEC,
                 "report": _REPORT,
@@ -217,7 +257,7 @@ class ModelRegistry:
             (tmp / _FEATURE_SPEC).write_text(json.dumps(feature_spec.to_dict(), indent=2), "utf-8")
             (tmp / _SCALER).write_text(json.dumps(scaler.to_dict()), encoding="utf-8")
             (tmp / _REPORT).write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
-            torch.save(model.state_dict(), tmp / _WEIGHTS)
+            _write_weights(model, model_type, tmp / weights_name)
             os.replace(tmp, target)
         finally:
             if tmp.exists():
@@ -225,8 +265,19 @@ class ModelRegistry:
 
         return ModelInfo.from_manifest(manifest)
 
+    def load_model(self, model_id: str) -> tuple[Any, StandardScaler, ModelInfo]:
+        """Load a model by id, dispatching on ``manifest["model_type"]``.
+
+        Returns ``(predictor, scaler, info)`` where ``predictor`` is an eval-mode
+        torch module (``lstm``) or a LightGBM ``Booster`` (``gbm``).
+        """
+        model_type = self._manifest(model_id).get("model_type", "lstm")
+        if model_type == "gbm":
+            return self.load_gbm(model_id)
+        return self.load_torch(model_id)
+
     def load_torch(self, model_id: str) -> tuple[LSTMClassifier, StandardScaler, ModelInfo]:
-        """Load one model's net (eval mode), scaler, and info.
+        """Load one LSTM model's net (eval mode), scaler, and info.
 
         Raises:
             ModelNotFound: nothing registered under ``model_id``.
@@ -239,15 +290,47 @@ class ModelRegistry:
         manifest = self._manifest(model_id)
         info = ModelInfo.from_manifest(manifest)
         directory = self.path(model_id)
+        weights = manifest.get("files", {}).get("weights", _WEIGHTS)
 
         config = LSTMConfig.from_dict(manifest["hyperparameters"])
         net = LSTMClassifier(config)
-        state = torch.load(directory / _WEIGHTS, map_location="cpu", weights_only=True)
+        state = torch.load(directory / weights, map_location="cpu", weights_only=True)
         net.load_state_dict(state)
         net.eval()
 
         scaler = StandardScaler.from_dict(json.loads((directory / _SCALER).read_text("utf-8")))
         return net, scaler, info
+
+    def load_gbm(self, model_id: str) -> tuple[Any, StandardScaler, ModelInfo]:
+        """Load one GBM model's LightGBM ``Booster``, scaler, and info.
+
+        Raises:
+            ModelNotFound: nothing registered under ``model_id``.
+        """
+        from trader.models._optional import require_lightgbm
+        from trader.models.scaler import StandardScaler
+
+        lgb = require_lightgbm()
+        manifest = self._manifest(model_id)
+        info = ModelInfo.from_manifest(manifest)
+        directory = self.path(model_id)
+        weights = manifest.get("files", {}).get("weights", _WEIGHTS_GBM)
+
+        booster = lgb.Booster(model_file=str(directory / weights))
+        scaler = StandardScaler.from_dict(json.loads((directory / _SCALER).read_text("utf-8")))
+        return booster, scaler, info
+
+
+def _write_weights(model: Any, model_type: str, path: Path) -> None:
+    """Serialise ``model``'s weights to ``path`` in the format for ``model_type``."""
+    if model_type == "lstm":
+        import torch
+
+        torch.save(model.state_dict(), path)
+        return
+    # LightGBM sklearn estimator -> its underlying Booster's portable text format.
+    booster = getattr(model, "booster_", model)
+    booster.save_model(str(path))
 
 
 def _digest(*parts: object) -> str:

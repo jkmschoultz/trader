@@ -58,7 +58,7 @@ async def test_sweep_ranks_every_config(cv_settings):
     assert seen[-1] == pytest.approx(1.0)
 
     text = render(report)
-    assert "Tuning sweep: 4 configs" in text
+    assert "Tuning sweep [lstm]: 4 configs" in text
     assert "window=8 threshold=0.0" in text
 
 
@@ -75,7 +75,7 @@ async def test_a_broken_config_is_recorded_not_fatal(cv_settings):
 
 
 def test_grid_key_must_be_a_real_field():
-    with pytest.raises(ValueError, match="not a TrainingSpec or CVConfig field"):
+    with pytest.raises(ValueError, match="not valid for strategy 'lstm'"):
         _spec({"nonsense": [1, 2]})
 
 
@@ -97,7 +97,7 @@ async def test_sweep_runs_across_processes(cv_settings):
 
 
 def test_base_split_dates_are_rejected():
-    with pytest.raises(ValueError, match="run_cv derives folds"):
+    with pytest.raises(ValueError, match="folds are derived"):
         TuningSpec(
             base=dict(symbols=["X"], train_end="2024-01-08", val_end="2024-01-10"),
             cv=dict(train_days=8, val_days=2, test_days=2),

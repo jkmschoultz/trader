@@ -465,5 +465,5 @@ def test_tune_golden_run_prints_a_ranked_table(capsys, monkeypatch, tmp_path, se
     )
     assert code == 0
     out = capsys.readouterr().out
-    assert "Tuning sweep: 2 configs" in out
+    assert "Tuning sweep [lstm]: 2 configs" in out
     assert out_path.is_file()

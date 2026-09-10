@@ -68,6 +68,7 @@ class ModelSummary:
     id: str
     name: str
     created_at: str
+    model_type: str
     horizon: int
     context_horizons: list[int]
     feature_set: str
@@ -162,6 +163,7 @@ def list_models(settings: Settings) -> list[ModelSummary]:
             id=info.id,
             name=info.name,
             created_at=info.created_at,
+            model_type=info.model_type,
             horizon=info.base_horizon,
             context_horizons=info.context_horizons,
             feature_set=info.feature_set,

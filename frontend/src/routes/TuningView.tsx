@@ -1,10 +1,10 @@
-import { Fragment, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 
 import { api, ApiError } from "../api/client";
 import { JobProgress } from "../components/JobProgress";
 import { ASSET_TYPES, DEFAULT_ASSET_TYPE } from "../assetTypes";
 import { DEFAULT_EXCHANGE, EXCHANGES } from "../exchanges";
-import { useFeatureSets, useJob, useJobs, useStickyJobId } from "../hooks";
+import { useFeatureSets, useJob, useJobs, useStickyJobId, useStrategies } from "../hooks";
 import type { GridValue, Job, TuningReport, TuningRow, TuningSpec } from "../api/types";
 
 const field =
@@ -14,12 +14,20 @@ const label = "block text-xs font-medium text-slate-500";
 const num = (s: string): number => Number(s);
 const list = (s: string): string[] => s.split(",").map((x) => x.trim()).filter(Boolean);
 
-const SWEEPABLE = [
+const MODEL_STRATEGIES = new Set(["lstm", "gbm"]);
+const SCORING_FIELDS = ["allocator", "leverage", "fee_bps", "spread_bps", "slippage_bps"];
+const LSTM_SWEEPABLE = ["window", "hidden", "layers", "dropout", "lr"];
+const GBM_SWEEPABLE = [
   "window",
-  "hidden",
-  "layers",
-  "dropout",
+  "num_leaves",
+  "n_estimators",
+  "max_depth",
+  "min_child_samples",
+  "subsample",
+  "colsample_bytree",
   "lr",
+];
+const MODEL_COMMON_SWEEPABLE = [
   "stop",
   "take",
   "max_bars",
@@ -47,14 +55,15 @@ const fmtPct = (v: number | null | undefined): string =>
 
 function FoldTable({ row }: { row: TuningRow }) {
   if (!row.folds?.length) return null;
+  const showF1 = row.folds.some((f) => f.val_macro_f1 != null || f.test_macro_f1 != null);
   return (
     <table className="mt-1 w-full font-mono text-[11px] tabular-nums">
       <thead className="text-left text-slate-400">
         <tr>
           <th className="py-0.5 pr-3">fold</th>
           <th className="py-0.5 pr-3">test ends</th>
-          <th className="py-0.5 pr-3">val F1</th>
-          <th className="py-0.5 pr-3">test F1</th>
+          {showF1 && <th className="py-0.5 pr-3">val F1</th>}
+          {showF1 && <th className="py-0.5 pr-3">test F1</th>}
           <th className="py-0.5 pr-3">return</th>
           <th className="py-0.5 pr-3">Sharpe</th>
           <th className="py-0.5 pr-3">hit</th>
@@ -67,8 +76,8 @@ function FoldTable({ row }: { row: TuningRow }) {
           <tr key={f.fold} className="border-t border-slate-100 dark:border-slate-800">
             <td className="py-0.5 pr-3">{f.fold}</td>
             <td className="py-0.5 pr-3">{f.test_end?.slice(0, 10) ?? "–"}</td>
-            <td className="py-0.5 pr-3">{fmtNum(f.val_macro_f1, 3)}</td>
-            <td className="py-0.5 pr-3">{fmtNum(f.test_macro_f1, 3)}</td>
+            {showF1 && <td className="py-0.5 pr-3">{fmtNum(f.val_macro_f1, 3)}</td>}
+            {showF1 && <td className="py-0.5 pr-3">{fmtNum(f.test_macro_f1, 3)}</td>}
             <td className="py-0.5 pr-3">{fmtPct(f.metrics.total_return)}</td>
             <td className="py-0.5 pr-3">{fmtNum(f.metrics.sharpe)}</td>
             <td className="py-0.5 pr-3">{fmtPct(f.metrics.hit_rate)}</td>
@@ -206,10 +215,19 @@ function RecentSweeps({
 
 export function TuningView() {
   const featureSets = useFeatureSets();
+  const strategies = useStrategies();
   const jobs = useJobs();
   const [jobId, setJobId] = useStickyJobId("job:tune");
   const job = useJob(jobId);
   const [error, setError] = useState<string | null>(null);
+
+  const [strategy, setStrategy] = useState("lstm");
+  const isModel = MODEL_STRATEGIES.has(strategy);
+  const isGbm = strategy === "gbm";
+  const current = useMemo(
+    () => strategies.data?.find((s) => s.name === strategy),
+    [strategies.data, strategy],
+  );
 
   const [symbols, setSymbols] = useState("US500, GER40");
   const [uics, setUics] = useState("");
@@ -227,6 +245,16 @@ export function TuningView() {
   const [hidden, setHidden] = useState("64");
   const [layers, setLayers] = useState("2");
   const [epochs, setEpochs] = useState("40");
+  const [numLeaves, setNumLeaves] = useState("31");
+  const [nEstimators, setNEstimators] = useState("400");
+  const [strategyParams, setStrategyParams] = useState<Record<string, string>>({});
+
+  const sweepable = useMemo(() => {
+    if (strategy === "lstm") return [...LSTM_SWEEPABLE, ...MODEL_COMMON_SWEEPABLE];
+    if (strategy === "gbm") return [...GBM_SWEEPABLE, ...MODEL_COMMON_SWEEPABLE];
+    const ctor = (current?.params ?? []).map((p) => p.name).filter((n) => n !== "models_dir");
+    return [...ctor, ...SCORING_FIELDS];
+  }, [strategy, current]);
 
   const [folds, setFolds] = useState("5");
   const [mode, setMode] = useState<"rolling" | "anchored">("rolling");
@@ -263,24 +291,41 @@ export function TuningView() {
       setError("Add at least one grid row with a field and values.");
       return;
     }
+    const modelBase = isModel
+      ? {
+          model_type: strategy as "lstm" | "gbm",
+          context_horizons: list(context),
+          feature_set: featureSet,
+          stop: num(stop),
+          take: num(take),
+          max_bars: num(maxBars),
+          min_return: num(minReturn) || 0,
+          window: num(windowBars),
+          ...(isGbm
+            ? { num_leaves: num(numLeaves), n_estimators: num(nEstimators) }
+            : { hidden: num(hidden), layers: num(layers), epochs: num(epochs) }),
+        }
+      : {};
+
+    const classicalParams: Record<string, unknown> = {};
+    if (!isModel) {
+      for (const info of current?.params ?? []) {
+        if (info.name === "models_dir") continue;
+        const raw = strategyParams[info.name]?.trim();
+        if (raw) classicalParams[info.name] = coerce(raw);
+      }
+    }
+
     const spec: TuningSpec = {
+      strategy,
       base: {
         symbols: list(symbols),
         uics: list(uics).map(Number).filter((n) => !Number.isNaN(n)),
         asset_type: assetType || null,
         exchange: exchange || null,
         horizon,
-        context_horizons: list(context),
-        feature_set: featureSet,
-        stop: num(stop),
-        take: num(take),
-        max_bars: num(maxBars),
-        min_return: num(minReturn) || 0,
-        window: num(windowBars),
         since: since || null,
-        hidden: num(hidden),
-        layers: num(layers),
-        epochs: num(epochs),
+        ...modelBase,
       },
       cv: {
         folds: num(folds),
@@ -291,8 +336,9 @@ export function TuningView() {
         fee_bps: num(feeBps),
         spread_bps: num(spreadBps),
         slippage_bps: num(slippageBps),
-        threshold: num(threshold),
+        ...(isModel ? { threshold: num(threshold) } : {}),
       },
+      ...(isModel ? {} : { params: classicalParams }),
       grid: gridObj,
       max_workers: num(workers),
     };
@@ -354,34 +400,27 @@ export function TuningView() {
             </select>
           </div>
           <div>
+            <label className={label}>Strategy</label>
+            <select
+              className={`${field} w-full`}
+              value={strategy}
+              onChange={(e) => setStrategy(e.target.value)}
+            >
+              {(strategies.data ?? [{ name: "lstm" }, { name: "gbm" }]).map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                  {MODEL_STRATEGIES.has(s.name) ? " (model)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
             <label className={label}>Base horizon</label>
             <input
               className={`${field} w-full`}
               value={horizon}
               onChange={(e) => setHorizon(e.target.value)}
             />
-          </div>
-          <div>
-            <label className={label}>Context horizons</label>
-            <input
-              className={`${field} w-full`}
-              value={context}
-              onChange={(e) => setContext(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className={label}>Feature set</label>
-            <select
-              className={`${field} w-full`}
-              value={featureSet}
-              onChange={(e) => setFeatureSet(e.target.value)}
-            >
-              {(featureSets.data ?? []).map((f) => (
-                <option key={f.name} value={f.name}>
-                  {f.name}
-                </option>
-              ))}
-            </select>
           </div>
           <div>
             <label className={label}>Since</label>
@@ -392,63 +431,147 @@ export function TuningView() {
             />
           </div>
 
-          <div>
-            <label className={label}>Stop</label>
-            <input className={`${field} w-full`} value={stop} onChange={(e) => setStop(e.target.value)} />
-          </div>
-          <div>
-            <label className={label}>Take</label>
-            <input className={`${field} w-full`} value={take} onChange={(e) => setTake(e.target.value)} />
-          </div>
-          <div>
-            <label className={label}>Max bars</label>
-            <input
-              className={`${field} w-full`}
-              value={maxBars}
-              onChange={(e) => setMaxBars(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className={label}>Min return</label>
-            <input
-              className={`${field} w-full`}
-              value={minReturn}
-              onChange={(e) => setMinReturn(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className={label}>Window</label>
-            <input
-              className={`${field} w-full`}
-              value={windowBars}
-              onChange={(e) => setWindowBars(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className={label}>Hidden</label>
-            <input
-              className={`${field} w-full`}
-              value={hidden}
-              onChange={(e) => setHidden(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className={label}>Layers</label>
-            <input
-              className={`${field} w-full`}
-              value={layers}
-              onChange={(e) => setLayers(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className={label}>Epochs</label>
-            <input
-              className={`${field} w-full`}
-              value={epochs}
-              onChange={(e) => setEpochs(e.target.value)}
-            />
-          </div>
+          {isModel && (
+            <>
+              <div>
+                <label className={label}>Context horizons</label>
+                <input
+                  className={`${field} w-full`}
+                  value={context}
+                  onChange={(e) => setContext(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className={label}>Feature set</label>
+                <select
+                  className={`${field} w-full`}
+                  value={featureSet}
+                  onChange={(e) => setFeatureSet(e.target.value)}
+                >
+                  {(featureSets.data ?? []).map((f) => (
+                    <option key={f.name} value={f.name}>
+                      {f.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={label}>Stop</label>
+                <input
+                  className={`${field} w-full`}
+                  value={stop}
+                  onChange={(e) => setStop(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className={label}>Take</label>
+                <input
+                  className={`${field} w-full`}
+                  value={take}
+                  onChange={(e) => setTake(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className={label}>Max bars</label>
+                <input
+                  className={`${field} w-full`}
+                  value={maxBars}
+                  onChange={(e) => setMaxBars(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className={label}>Min return</label>
+                <input
+                  className={`${field} w-full`}
+                  value={minReturn}
+                  onChange={(e) => setMinReturn(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className={label}>Window</label>
+                <input
+                  className={`${field} w-full`}
+                  value={windowBars}
+                  onChange={(e) => setWindowBars(e.target.value)}
+                />
+              </div>
+              {isGbm ? (
+                <>
+                  <div>
+                    <label className={label}>Num leaves</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={numLeaves}
+                      onChange={(e) => setNumLeaves(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Trees (n_estimators)</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={nEstimators}
+                      onChange={(e) => setNEstimators(e.target.value)}
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className={label}>Hidden</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={hidden}
+                      onChange={(e) => setHidden(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Layers</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={layers}
+                      onChange={(e) => setLayers(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Epochs</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={epochs}
+                      onChange={(e) => setEpochs(e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </div>
+
+        {!isModel && current && current.params.filter((p) => p.name !== "models_dir").length > 0 && (
+          <fieldset className="rounded border border-slate-200 p-3 dark:border-slate-800">
+            <legend className="px-1 text-xs font-medium text-slate-500">
+              {current.name} fixed parameters (leave blank for the default; sweep others in the grid)
+            </legend>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              {current.params
+                .filter((p) => p.name !== "models_dir")
+                .map((p) => (
+                  <div key={p.name}>
+                    <label className={label}>
+                      {p.name} <span className="text-slate-400">{p.type}</span>
+                    </label>
+                    <input
+                      className={`${field} w-full`}
+                      placeholder={p.default == null ? "" : String(p.default)}
+                      value={strategyParams[p.name] ?? ""}
+                      onChange={(e) =>
+                        setStrategyParams((prev) => ({ ...prev, [p.name]: e.target.value }))
+                      }
+                    />
+                  </div>
+                ))}
+            </div>
+          </fieldset>
+        )}
 
         <fieldset className="grid grid-cols-2 gap-3 rounded border border-slate-200 p-3 md:grid-cols-4 dark:border-slate-800">
           <legend className="px-1 text-xs font-medium text-slate-500">Walk-forward CV</legend>
@@ -519,14 +642,16 @@ export function TuningView() {
               onChange={(e) => setSlippageBps(e.target.value)}
             />
           </div>
-          <div>
-            <label className={label}>Threshold</label>
-            <input
-              className={`${field} w-full`}
-              value={threshold}
-              onChange={(e) => setThreshold(e.target.value)}
-            />
-          </div>
+          {isModel && (
+            <div>
+              <label className={label}>Threshold</label>
+              <input
+                className={`${field} w-full`}
+                value={threshold}
+                onChange={(e) => setThreshold(e.target.value)}
+              />
+            </div>
+          )}
           <div>
             <label className={label}>Workers (0 = auto)</label>
             <input
@@ -542,7 +667,7 @@ export function TuningView() {
             Grid (each row: a field and the values to sweep)
           </legend>
           <datalist id="sweepable">
-            {SWEEPABLE.map((f) => (
+            {sweepable.map((f) => (
               <option key={f} value={f} />
             ))}
           </datalist>
@@ -597,9 +722,19 @@ export function TuningView() {
       )}
 
       <p className="text-xs text-slate-400">
-        A sweep trains a fresh model per config per fold in a scratch registry and keeps only
-        its scores — the models are not saved. Use <span className="font-medium">Train</span> to
-        register a model from a config you want to keep.
+        {isModel ? (
+          <>
+            A sweep trains a fresh model per config per fold in a scratch registry and keeps only
+            its scores — the models are not saved. Use <span className="font-medium">Train</span>{" "}
+            to register a model from a config you want to keep.
+          </>
+        ) : (
+          <>
+            A classical sweep runs one walk-forward backtest per config per fold — no training.
+            Every strategy type is scored on the same folds, costs, and median out-of-sample
+            Sharpe.
+          </>
+        )}
       </p>
 
       <RecentSweeps jobs={jobs.data ?? []} currentId={jobId} onPick={setJobId} />

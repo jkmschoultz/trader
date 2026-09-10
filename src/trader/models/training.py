@@ -11,8 +11,6 @@ from __future__ import annotations
 import random
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
 import torch
@@ -20,40 +18,9 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from trader.models.lstm import LSTMClassifier, LSTMConfig
+from trader.models.report import TrainReport
 
 __all__ = ["TrainReport", "train_model"]
-
-
-@dataclass
-class TrainReport:
-    epochs: list[dict[str, float]] = field(default_factory=list)
-    best_epoch: int = 0
-    val_confusion: list[list[int]] = field(default_factory=list)
-    test_confusion: list[list[int]] | None = None
-    class_distribution: dict[str, dict[str, int]] = field(default_factory=dict)
-    metrics: dict[str, float] = field(default_factory=dict)
-    n_features: int = 0
-    n_train: int = 0
-    n_val: int = 0
-    n_test: int = 0
-    elapsed_seconds: float = 0.0
-    torch_version: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "epochs": self.epochs,
-            "best_epoch": self.best_epoch,
-            "val_confusion": self.val_confusion,
-            "test_confusion": self.test_confusion,
-            "class_distribution": self.class_distribution,
-            "metrics": self.metrics,
-            "n_features": self.n_features,
-            "n_train": self.n_train,
-            "n_val": self.n_val,
-            "n_test": self.n_test,
-            "elapsed_seconds": round(self.elapsed_seconds, 2),
-            "torch_version": self.torch_version,
-        }
 
 
 def _seed_everything(seed: int) -> None:

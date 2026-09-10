@@ -6,7 +6,7 @@ import { JobProgress } from "../components/JobProgress";
 import { ASSET_TYPES, DEFAULT_ASSET_TYPE } from "../assetTypes";
 import { DEFAULT_EXCHANGE, EXCHANGES } from "../exchanges";
 import { useFeatureSets, useJob, useModel, useModels, useStickyJobId } from "../hooks";
-import type { ModelSummary, TrainingResult, TrainingSpec } from "../api/types";
+import type { ModelSummary, ModelType, TrainingResult, TrainingSpec } from "../api/types";
 
 const field =
   "rounded border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700";
@@ -91,13 +91,21 @@ function ModelDetail({ id }: { id: string }) {
         </table>
       )}
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-slate-500">
+        <span>type: {data.model_type}</span>
         <span>symbols: {data.symbols.join(", ") || "–"}</span>
         <span>train→{String(data.split.train_end ?? "?").slice(0, 10)}</span>
         <span>val→{String(data.split.val_end ?? "?").slice(0, 10)}</span>
-        <span>
-          net: h{String(data.hyperparameters.hidden)}×{String(data.hyperparameters.layers)}
-        </span>
-        <span>epochs: {String(data.hyperparameters.epochs ?? "–")}</span>
+        {data.model_type === "gbm" ? (
+          <span>
+            trees: {String(data.hyperparameters.n_estimators ?? "–")} · leaves:{" "}
+            {String(data.hyperparameters.num_leaves ?? "–")}
+          </span>
+        ) : (
+          <span>
+            net: h{String(data.hyperparameters.hidden)}×{String(data.hyperparameters.layers)} ·
+            epochs: {String(data.hyperparameters.epochs ?? "–")}
+          </span>
+        )}
         <span>lr: {String(data.hyperparameters.lr ?? "–")}</span>
       </div>
     </div>
@@ -176,6 +184,7 @@ export function TrainView() {
   const [symbols, setSymbols] = useState("AAPL");
   const [assetType, setAssetType] = useState(DEFAULT_ASSET_TYPE);
   const [exchange, setExchange] = useState(DEFAULT_EXCHANGE);
+  const [modelType, setModelType] = useState<ModelType>("lstm");
   const [horizon, setHorizon] = useState("5m");
   const [context, setContext] = useState("");
   const [featureSet, setFeatureSet] = useState("price_v1");
@@ -189,14 +198,25 @@ export function TrainView() {
   const [since, setSince] = useState("2y");
   const [epochs, setEpochs] = useState("40");
 
+  // LSTM
   const [hidden, setHidden] = useState("64");
   const [layers, setLayers] = useState("2");
   const [dropout, setDropout] = useState("0.2");
-  const [lr, setLr] = useState("0.001");
   const [batchSize, setBatchSize] = useState("128");
-  const [seed, setSeed] = useState("0");
   const [bidirectional, setBidirectional] = useState(false);
+  // GBM
+  const [numLeaves, setNumLeaves] = useState("31");
+  const [nEstimators, setNEstimators] = useState("400");
+  const [maxDepth, setMaxDepth] = useState("-1");
+  const [minChildSamples, setMinChildSamples] = useState("20");
+  const [subsample, setSubsample] = useState("0.8");
+  const [colsampleBytree, setColsampleBytree] = useState("0.8");
+  // shared
+  const [lr, setLr] = useState("0.001");
+  const [seed, setSeed] = useState("0");
   const [sampleWeights, setSampleWeights] = useState(false);
+
+  const isGbm = modelType === "gbm";
 
   const running = jobId != null && (!job || job.status === "queued" || job.status === "running");
   const result = job?.status === "done" ? (job.result as TrainingResult) : null;
@@ -214,6 +234,7 @@ export function TrainView() {
       symbols: list(symbols),
       asset_type: assetType || null,
       exchange: exchange || null,
+      model_type: modelType,
       horizon,
       context_horizons: list(context),
       feature_set: featureSet,
@@ -225,15 +246,26 @@ export function TrainView() {
       train_end: trainEnd,
       val_end: valEnd,
       since: since || null,
-      epochs: num(epochs),
-      hidden: num(hidden),
-      layers: num(layers),
-      dropout: num(dropout),
-      bidirectional,
       lr: num(lr),
-      batch_size: num(batchSize),
       seed: num(seed),
       use_sample_weights: sampleWeights,
+      ...(isGbm
+        ? {
+            num_leaves: num(numLeaves),
+            n_estimators: num(nEstimators),
+            max_depth: num(maxDepth),
+            min_child_samples: num(minChildSamples),
+            subsample: num(subsample),
+            colsample_bytree: num(colsampleBytree),
+          }
+        : {
+            epochs: num(epochs),
+            hidden: num(hidden),
+            layers: num(layers),
+            dropout: num(dropout),
+            bidirectional,
+            batch_size: num(batchSize),
+          }),
     };
     try {
       const { job_id } = await api.submitTraining(spec);
@@ -282,6 +314,17 @@ export function TrainView() {
                   {x.label}
                 </option>
               ))}
+            </select>
+          </div>
+          <div>
+            <label className={label}>Model type</label>
+            <select
+              className={`${field} w-full`}
+              value={modelType}
+              onChange={(e) => setModelType(e.target.value as ModelType)}
+            >
+              <option value="lstm">lstm (torch sequence)</option>
+              <option value="gbm">gbm (LightGBM)</option>
             </select>
           </div>
 
@@ -386,11 +429,11 @@ export function TrainView() {
             />
           </div>
           <div>
-            <label className={label}>Epochs</label>
+            <label className={label}>{isGbm ? "Trees (n_estimators)" : "Epochs"}</label>
             <input
               className={`${field} w-full`}
-              value={epochs}
-              onChange={(e) => setEpochs(e.target.value)}
+              value={isGbm ? nEstimators : epochs}
+              onChange={(e) => (isGbm ? setNEstimators : setEpochs)(e.target.value)}
             />
           </div>
         </div>
@@ -405,44 +448,91 @@ export function TrainView() {
           </button>
           {advanced && (
             <div className="mt-2 grid grid-cols-2 gap-3 rounded border border-slate-200 p-3 md:grid-cols-4 dark:border-slate-800">
-              <div>
-                <label className={label}>Hidden</label>
-                <input
-                  className={`${field} w-full`}
-                  value={hidden}
-                  onChange={(e) => setHidden(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className={label}>Layers</label>
-                <input
-                  className={`${field} w-full`}
-                  value={layers}
-                  onChange={(e) => setLayers(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className={label}>Dropout</label>
-                <input
-                  className={`${field} w-full`}
-                  value={dropout}
-                  onChange={(e) => setDropout(e.target.value)}
-                />
-              </div>
+              {isGbm ? (
+                <>
+                  <div>
+                    <label className={label}>Num leaves</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={numLeaves}
+                      onChange={(e) => setNumLeaves(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Max depth (-1 = none)</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={maxDepth}
+                      onChange={(e) => setMaxDepth(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Min child samples</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={minChildSamples}
+                      onChange={(e) => setMinChildSamples(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Subsample</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={subsample}
+                      onChange={(e) => setSubsample(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Colsample bytree</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={colsampleBytree}
+                      onChange={(e) => setColsampleBytree(e.target.value)}
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className={label}>Hidden</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={hidden}
+                      onChange={(e) => setHidden(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Layers</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={layers}
+                      onChange={(e) => setLayers(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Dropout</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={dropout}
+                      onChange={(e) => setDropout(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={label}>Batch size</label>
+                    <input
+                      className={`${field} w-full`}
+                      value={batchSize}
+                      onChange={(e) => setBatchSize(e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
               <div>
                 <label className={label}>Learning rate</label>
                 <input
                   className={`${field} w-full`}
                   value={lr}
                   onChange={(e) => setLr(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className={label}>Batch size</label>
-                <input
-                  className={`${field} w-full`}
-                  value={batchSize}
-                  onChange={(e) => setBatchSize(e.target.value)}
                 />
               </div>
               <div>
@@ -453,14 +543,16 @@ export function TrainView() {
                   onChange={(e) => setSeed(e.target.value)}
                 />
               </div>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={bidirectional}
-                  onChange={(e) => setBidirectional(e.target.checked)}
-                />
-                Bidirectional
-              </label>
+              {!isGbm && (
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={bidirectional}
+                    onChange={(e) => setBidirectional(e.target.checked)}
+                  />
+                  Bidirectional
+                </label>
+              )}
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
@@ -489,7 +581,8 @@ export function TrainView() {
         <section className="space-y-3 rounded border border-slate-200 p-4 dark:border-slate-800">
           <p className="text-sm">
             Trained <code className="font-mono">{result.model_id}</code>. Pick it in the{" "}
-            <span className="font-medium">Backtest</span> tab (strategy&nbsp;<code>lstm</code>).
+            <span className="font-medium">Backtest</span> tab (strategy&nbsp;
+            <code>{modelType}</code>).
           </p>
           <div className="flex flex-wrap gap-6 font-mono text-sm tabular-nums">
             {Object.entries(result.metrics).map(([k, v]) => (

@@ -172,20 +172,24 @@ export function StrategyForm({
                   <label className={label}>
                     {p.name} <span className="text-slate-400">{p.type}</span>
                   </label>
-                  {strategy === "lstm" && p.name === "model" ? (
+                  {(strategy === "lstm" || strategy === "gbm") && p.name === "model" ? (
                     <select
                       className={`${field} w-full`}
                       value={params[p.name] ?? ""}
                       onChange={(e) => setParams((prev) => ({ ...prev, [p.name]: e.target.value }))}
                     >
                       <option value="">
-                        {models.data?.length ? "select a model…" : "no models trained yet"}
+                        {models.data?.some((m) => m.model_type === strategy)
+                          ? "select a model…"
+                          : `no ${strategy} models trained yet`}
                       </option>
-                      {models.data?.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.id}
-                        </option>
-                      ))}
+                      {models.data
+                        ?.filter((m) => m.model_type === strategy)
+                        .map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.id}
+                          </option>
+                        ))}
                     </select>
                   ) : (
                     <input

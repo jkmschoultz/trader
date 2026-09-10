@@ -43,24 +43,37 @@ def _epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
 
 @dataclass(frozen=True)
 class WindowSpec:
-    """Everything that decides the shape of a training example."""
+    """Everything that decides the shape of a training example.
+
+    ``layout`` picks the array shape :func:`build_bundle` emits:
+
+    * ``"sequence"`` -- ``X`` is ``(n, window, F)``, for a model that consumes the
+      lag stack as an ordered sequence (the LSTM).
+    * ``"tabular"`` -- ``X`` is ``(n, window * F)``, the same rows flattened
+      newest-lag-first, for a model that wants one flat feature vector (a
+      gradient-boosted tree). ``window=1`` + ``"tabular"`` is just the
+      current-bar features.
+    """
 
     window: int
     feature_set: str
     base_horizon: int
     context_horizons: tuple[int, ...]
     label: LabelConfig
+    layout: Literal["sequence", "tabular"] = "sequence"
 
     def __post_init__(self) -> None:
         if self.window < 1:
             raise ValueError(f"window must be >= 1, got {self.window}")
+        if self.layout not in ("sequence", "tabular"):
+            raise ValueError(f"layout must be 'sequence' or 'tabular', got {self.layout!r}")
 
 
 @dataclass
 class SequenceBundle:
     """Model-ready arrays for one instrument (or several, concatenated)."""
 
-    X: np.ndarray  # (n, window, F) float32
+    X: np.ndarray  # (n, window, F) float32, or (n, window*F) when layout="tabular"
     y: np.ndarray  # (n,) int64 in {0, 1, 2}   (from {-1, 0, +1})
     w: np.ndarray  # (n,) float32 sample weights
     t: np.ndarray  # (n,) int64 nanoseconds -- decision-bar timestamps
@@ -158,6 +171,14 @@ def build_bundle(
     else:
         w = np.ones(len(y), dtype=np.float32)
 
+    columns = list(features.columns)
+    if spec.layout == "tabular":
+        # (m, window, F) -> (m, window*F), oldest lag first. A tree consumes one
+        # flat vector; the lag index is folded into the feature name so a model
+        # trained here and the strategy at inference agree on column order.
+        strided = np.ascontiguousarray(strided.reshape(strided.shape[0], -1))
+        columns = [f"{c}__t-{window - 1 - k}" for k in range(window) for c in columns]
+
     if scaler is not None:
         strided = scaler.transform(strided)
 
@@ -166,7 +187,7 @@ def build_bundle(
         y=y,
         w=w,
         t=times_ns.astype(np.int64),
-        feature_names=list(features.columns),
+        feature_names=columns,
         feature_spec=feature_spec,
     )
 

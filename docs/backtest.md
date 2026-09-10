@@ -92,7 +92,9 @@ trade row.
   not by the engine.
 - **`history` is sliced per bar.** `frame.iloc[:i]` each event is fine for
   5-minute runs over months; a multi-year 1-minute run makes this the
-  bottleneck. A rolling view is the fix when that run matters.
+  bottleneck — including the classical walk-forward sweeps in
+  `docs/benchmarks.md`, which run one `bt.run` per fold per config. A rolling
+  view is the fix when that run matters.
 - **No borrow cost, no financing, no dividends.** Shorts and overnight holds are
   free. Fine for intraday research; a cost-model extension before anything
   holds overnight for real.

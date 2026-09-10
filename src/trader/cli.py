@@ -99,18 +99,26 @@ def _require_backtest_extra():
         ) from exc
 
 
-def _require_model_extra():
-    """Import the model layer, or explain the ``[model]`` extra (torch, sklearn)."""
+def _require_model_extra(model_type: str = "lstm"):
+    """Import the model layer, or explain the ``[model]`` extra.
+
+    ``model_type="gbm"`` needs lightgbm; anything else needs torch. sklearn and
+    the ``trader.models`` package are needed either way.
+    """
     try:
         import sklearn  # noqa: F401, PLC0415
-        import torch  # noqa: F401, PLC0415
+
+        if model_type == "gbm":
+            import lightgbm  # noqa: F401, PLC0415
+        else:
+            import torch  # noqa: F401, PLC0415
 
         from trader import models  # noqa: PLC0415
 
         return models
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise UsageError(
-            f"the train command needs the optional model dependencies ({exc}). "
+            f"this command needs the optional model dependencies ({exc}). "
             'Install them with:  pip install -e ".[model]"'
         ) from exc
 
@@ -610,7 +618,7 @@ async def _cmd_labels(settings: Settings, args) -> int:
 
 
 async def _cmd_train(settings: Settings, args) -> int:
-    _require_model_extra()
+    _require_model_extra(args.model_type)
     from pydantic import ValidationError  # noqa: PLC0415
 
     from trader.service.errors import ServiceError  # noqa: PLC0415
@@ -624,6 +632,7 @@ async def _cmd_train(settings: Settings, args) -> int:
             asset_type=args.asset_type,
             exchange=args.exchange,
             name=args.name,
+            model_type=args.model_type,
             horizon=args.horizon,
             context_horizons=context,
             feature_set=args.feature_set,
@@ -642,6 +651,12 @@ async def _cmd_train(settings: Settings, args) -> int:
             bidirectional=args.bidirectional,
             epochs=args.epochs,
             batch_size=args.batch_size,
+            num_leaves=args.num_leaves,
+            n_estimators=args.n_estimators,
+            max_depth=args.max_depth,
+            min_child_samples=args.min_child_samples,
+            subsample=args.subsample,
+            colsample_bytree=args.colsample_bytree,
             lr=args.lr,
             use_sample_weights=args.sample_weights,
             seed=args.seed,
@@ -698,7 +713,11 @@ def _parse_grid(items: list[str]) -> dict[str, list[object]]:
 
 
 async def _cmd_tune(settings: Settings, args) -> int:
-    _require_model_extra()
+    is_model = args.strategy in ("lstm", "gbm")
+    if is_model:
+        _require_model_extra(args.model_type)
+    else:
+        _require_backtest_extra()
     from pathlib import Path  # noqa: PLC0415
 
     from pydantic import ValidationError  # noqa: PLC0415
@@ -709,12 +728,15 @@ async def _cmd_tune(settings: Settings, args) -> int:
     context = args.context.split(",") if args.context else []
     try:
         spec = TuningSpec(
+            strategy=args.strategy,
+            params=_parse_params(args.param),
             base=dict(
                 symbols=args.symbol,
                 uics=args.uic,
                 asset_type=args.asset_type,
                 exchange=args.exchange,
                 name=args.name,
+                model_type=args.model_type,
                 horizon=args.horizon,
                 context_horizons=context,
                 feature_set=args.feature_set,
@@ -731,6 +753,12 @@ async def _cmd_tune(settings: Settings, args) -> int:
                 bidirectional=args.bidirectional,
                 epochs=args.epochs,
                 batch_size=args.batch_size,
+                num_leaves=args.num_leaves,
+                n_estimators=args.n_estimators,
+                max_depth=args.max_depth,
+                min_child_samples=args.min_child_samples,
+                subsample=args.subsample,
+                colsample_bytree=args.colsample_bytree,
                 lr=args.lr,
                 use_sample_weights=args.sample_weights,
                 seed=args.seed,
@@ -880,6 +908,16 @@ def _first_error(exc: Exception) -> str:
         return str(exc)
 
 
+def _add_gbm_args(parser: argparse.ArgumentParser) -> None:
+    """LightGBM hyperparameters shared by ``train`` and ``tune`` (used when --model-type gbm)."""
+    parser.add_argument("--num-leaves", type=int, default=31)
+    parser.add_argument("--n-estimators", type=int, default=400)
+    parser.add_argument("--max-depth", type=int, default=-1, help="-1 = no limit")
+    parser.add_argument("--min-child-samples", type=int, default=20)
+    parser.add_argument("--subsample", type=float, default=0.8)
+    parser.add_argument("--colsample-bytree", type=float, default=0.8)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trader", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1009,12 +1047,15 @@ def _build_parser() -> argparse.ArgumentParser:
     labels_p.add_argument("--min-return", type=float, default=0.0, help="timeout deadband")
     labels_p.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
 
-    train_p = sub.add_parser("train", help="train an LSTM and register it (needs [model])")
+    train_p = sub.add_parser("train", help="train a model and register it (needs [model])")
     train_p.add_argument("--symbol", action="append", required=True, metavar="SYMBOL")
     train_p.add_argument("--uic", action="append", type=int, default=[])
     train_p.add_argument("--asset-type")
     train_p.add_argument("--exchange")
     train_p.add_argument("--name", default="lstm", help="registry name prefix")
+    train_p.add_argument(
+        "--model-type", choices=("lstm", "gbm"), default="lstm", help="model family (default lstm)"
+    )
     train_p.add_argument("--horizon", default="5m")
     train_p.add_argument("--context", help="comma-separated context horizons, e.g. 15m,1h")
     train_p.add_argument("--feature-set", default="price_v1")
@@ -1033,20 +1074,39 @@ def _build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--bidirectional", action="store_true")
     train_p.add_argument("--epochs", type=int, default=40)
     train_p.add_argument("--batch-size", type=int, default=128)
-    train_p.add_argument("--lr", type=float, default=1e-3)
+    _add_gbm_args(train_p)
+    train_p.add_argument("--lr", type=float, default=1e-3, help="LSTM Adam lr / GBM learning rate")
     train_p.add_argument(
         "--sample-weights", action="store_true", help="weight by return / uniqueness"
     )
     train_p.add_argument("--seed", type=int, default=0)
 
     tune_p = sub.add_parser(
-        "tune", help="walk-forward grid sweep over training knobs (needs [model])"
+        "tune", help="walk-forward grid sweep over a strategy's knobs"
     )
     tune_p.add_argument("--symbol", action="append", required=True, metavar="SYMBOL")
     tune_p.add_argument("--uic", action="append", type=int, default=[])
     tune_p.add_argument("--asset-type")
     tune_p.add_argument("--exchange")
     tune_p.add_argument("--name", default="lstm", help="registry name prefix")
+    tune_p.add_argument(
+        "--strategy",
+        default="lstm",
+        help="registered strategy to sweep: lstm, gbm (model), or ma_cross / orb (classical)",
+    )
+    tune_p.add_argument(
+        "--model-type",
+        choices=("lstm", "gbm"),
+        default="lstm",
+        help="model family for a model sweep",
+    )
+    tune_p.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="fixed strategy param for a classical sweep, e.g. --param flat_eod=true; repeatable",
+    )
     tune_p.add_argument("--horizon", default="15m")
     tune_p.add_argument("--context", help="comma-separated context horizons, e.g. 1h,4h")
     tune_p.add_argument("--feature-set", default="price_v1")
@@ -1063,7 +1123,8 @@ def _build_parser() -> argparse.ArgumentParser:
     tune_p.add_argument("--bidirectional", action="store_true")
     tune_p.add_argument("--epochs", type=int, default=40)
     tune_p.add_argument("--batch-size", type=int, default=128)
-    tune_p.add_argument("--lr", type=float, default=1e-3)
+    _add_gbm_args(tune_p)
+    tune_p.add_argument("--lr", type=float, default=1e-3, help="LSTM Adam lr / GBM learning rate")
     tune_p.add_argument("--sample-weights", action="store_true")
     tune_p.add_argument("--seed", type=int, default=0)
     tune_p.add_argument("--folds", type=int, default=5)

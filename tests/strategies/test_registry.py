@@ -10,7 +10,7 @@ from trader.strategies.registry import UnknownStrategy
 
 
 def test_the_builtins_are_registered():
-    assert {"ma_cross", "orb"} <= set(available())
+    assert {"ma_cross", "orb", "lstm", "gbm"} <= set(available())
 
 
 def test_get_strategy_returns_the_class():

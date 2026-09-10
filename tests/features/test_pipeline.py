@@ -78,7 +78,7 @@ def test_tail_slice_reproduces_the_last_rows(make_bars):
     full-history compute to well under float tolerance -- the tail keeps
     ``warmup + _TAIL_PAD * context_ratio`` bars, enough EMA burn-in that the
     residual is numerical noise."""
-    from trader.strategies.lstm import _TAIL_PAD
+    from trader.strategies.model_base import _TAIL_PAD
 
     bars = make_bars(6000, seed=7)
     window = 32

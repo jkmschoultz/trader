@@ -56,10 +56,17 @@ every labelled row as independent over-counts crowded stretches.
   mean 1; a big move that barely overlaps anything counts most.
 
 Training uses class weighting by default and multiplies in these per-sample
-weights only when `use_sample_weights=True`. The full sequential-bootstrap
-treatment (López de Prado, ch. 4) is deliberately left for a later phase —
-overlap weighting matters most for bagged trees on non-overlapping events, and
-class balance is the bigger lever for a first sequence model.
+weights only when `use_sample_weights=True` — for both the LSTM
+(`train_model`) and the GBM (`train_gbm`, which passes them straight to
+`LGBMClassifier.fit(sample_weight=...)`). The full sequential-bootstrap treatment
+(López de Prado, ch. 4) is deliberately left for a later phase — overlap
+weighting matters most for bagged trees on non-overlapping events, and class
+balance is the bigger lever for a first sequence model.
+
+The GBM consumes the same labels through a flattened feature layout: `build_bundle`
+with `WindowSpec(layout="tabular")` turns the `(n, window, F)` lag stack into one
+`(n, window * F)` row per decision bar, columns renamed `col__t-k`. The label,
+the barriers, and the split are untouched.
 
 ## Inspecting a parameterisation
 

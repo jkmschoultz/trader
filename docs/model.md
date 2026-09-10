@@ -1,9 +1,15 @@
 # The model layer: windowing, the split, the registry, and the strategy
 
 Phases 4c-4e are `trader.models` plus `trader.service.training` and the API/CLI
-around them. `torch` and `scikit-learn` are the optional `[model]` extra; the
-registry and manifest paths never import them, so `trader models list` and
-`GET /api/models` work on a `[data]`-only install.
+around them. `torch`, `scikit-learn` and `lightgbm` are the optional `[model]`
+extra; the registry and manifest paths never import them, so `trader models list`
+and `GET /api/models` work on a `[data]`-only install.
+
+There are two model families, chosen by `--model-type` (`TrainingSpec.model_type`):
+`lstm` (a torch sequence model) and `gbm` (a LightGBM gradient-boosted classifier
+on the flattened lag stack). They share the labels, the features, the split, the
+registry directory, and the decision rule — only the trainer, the feature
+`layout`, and the weights format differ.
 
 ## From bars to `(X, y, w, t)`
 
@@ -16,8 +22,11 @@ registry and manifest paths never import them, so `trader models list` and
    describes a trade entered at bar `i + 1`'s open, everything in `X[k]` is
    strictly older than the outcome `y[k]` measures — no leak.
 4. Drop any window containing a warmup NaN, and any row whose label is NaN.
-5. Map `{-1, 0, +1}` → `{0, 1, 2}`.
-6. `t[k]` is the decision bar's timestamp in epoch nanoseconds, kept for the
+5. `spec.layout` picks the shape: `"sequence"` keeps `X` as `(n, window, F)` for
+   the LSTM; `"tabular"` flattens it to `(n, window * F)` (oldest lag first,
+   columns renamed `col__t-k`) for the GBM. `run_cv` sets it from `model_type`.
+6. Map `{-1, 0, +1}` → `{0, 1, 2}`.
+7. `t[k]` is the decision bar's timestamp in epoch nanoseconds, kept for the
    split.
 
 `w` is per-sample weights: ones, unless `return_attribution_weights` are passed
@@ -61,10 +70,21 @@ It aggregates median / mean / std of Sharpe, return, turnover, hit rate and
 profit factor across folds, and counts `folds_sharpe_gt_0_5`. Classification
 accuracy is not the selection metric — out-of-sample Sharpe is.
 
-`run_tuning(settings, TuningSpec)` (`trader.service.tuning`) sweeps a `grid` of
-`TrainingSpec` / `CVConfig` fields: the cartesian product, each combo through
-`run_cv`, ranked by median OOS Sharpe (tie-break lower turnover). A per-config
-failure is an error row, not fatal. Configs run in parallel over a
+`run_strategy_cv(settings, StrategyCVSpec)` (`trader.service.evaluation`) is the
+model-free counterpart: no windowing, no training — build a **classical**
+strategy (`ma_cross`, `orb`, …) from its params per fold and score the same
+held-out window through the same `bt.run` + `CostModel`. `score_fold` and
+`aggregate_folds` are shared with `run_cv`, so both paths produce one comparable
+`{folds, aggregate}` shape.
+
+`run_tuning(settings, TuningSpec)` (`trader.service.tuning`) sweeps a `grid`:
+the cartesian product, each combo through the right CV path, ranked by median OOS
+Sharpe (tie-break lower turnover). `TuningSpec.strategy` selects the path —
+`"lstm"` / `"gbm"` sweep `TrainingSpec` / `CVConfig` fields and train per fold;
+any other registered name sweeps that strategy's constructor args (plus the
+scoring knobs `allocator`, `leverage`, `fee_bps`, `spread_bps`, `slippage_bps`)
+with `params` holding the fixed args. A per-config failure is an error row, not
+fatal. Configs run in parallel over a
 `ProcessPoolExecutor` (`max_workers`, default `min(4, configs, cpu//2)`; `1` =
 in-process) using a `spawn` context since torch is already loaded in the parent;
 each finished config emits an `on_message` line (`config i/n done — best median
@@ -86,6 +106,15 @@ by default, clips gradients, early-stops on validation macro-F1, and keeps the
 best `state_dict`. It returns the best model and a JSON-safe `TrainReport` (per-
 epoch curve, val + test confusion matrices, class distribution, timings).
 
+`GBMClassifier` (`--model-type gbm`) is a `lightgbm.LGBMClassifier`
+(`objective="multiclass"`, `num_class=3`) on the `layout="tabular"` lag stack.
+`train_gbm` (`trader.models.gbm`) early-stops on validation multi-logloss,
+supports the same `class_weight="balanced"` and per-sample weights, and fills the
+same model-agnostic `TrainReport` (`epochs` is the boosting eval curve;
+`framework_version` records the lightgbm version). It trains in seconds, so a GBM
+sweep is the cheap yardstick a heavier model has to beat. `TrainReport` now lives
+in `trader.models.report`, importable without torch or lightgbm.
+
 ## The registry
 
 `ModelRegistry` (`Settings.models_dir`, default `data_dir/models/`) stores one
@@ -93,29 +122,37 @@ model per directory, `{name}-{YYYYMMDD-HHMMSS}-{digest8}`:
 
 | file | contents |
 |---|---|
-| `manifest.json` | id, created_at, git commit, data spec, horizons, feature-set name + digest, window, barriers, split, hyperparameters, val/test metrics, class distribution, framework versions |
-| `weights.pt` | `torch` state_dict |
-| `scaler.json` | the numpy `StandardScaler` (mean, scale per feature) |
+| `manifest.json` | id, created_at, git commit, **`model_type`** (`lstm` \| `gbm`), **`layout`** (`sequence` \| `tabular`), data spec, horizons, feature-set name + digest, window, barriers, split, hyperparameters, val/test metrics, class distribution, framework versions |
+| `weights.pt` *or* `model.txt` | `torch` state_dict (`lstm`) or a LightGBM text model (`gbm`); `manifest["files"]["weights"]` names it |
+| `scaler.json` | the numpy `StandardScaler` (mean, scale per feature) — kept for the GBM too, a harmless no-op for trees |
 | `feature_spec.json` | the frozen `FeatureSpec` — inference recomputes features from exactly this |
 | `report.json` | the full `TrainReport` |
 
 `save` builds the directory under a sibling `.tmp` name and `os.replace`s it into
 place, so an interrupted or failed save leaves nothing partial behind. `list` and
-`get` parse manifests only (no torch); `load_torch` rebuilds the net and scaler.
-The digest in the id fingerprints the feature spec, barriers, window, and
+`get` parse manifests only (no torch/lightgbm); `load_model(id)` dispatches on
+`model_type` to `load_torch` / `load_gbm`, each returning `(predictor, scaler,
+info)`. A manifest with no `model_type` / `layout` reads as `lstm` / `sequence`,
+so models trained before this change still load. The digest in the id
+fingerprints `model_type`, the feature spec, barriers, window, and
 hyperparameters, so two genuinely different models never collide and a re-run of
 the same recipe is obvious.
 
-## `LSTMStrategy` — the model as a `Strategy`
+## `ModelStrategy` — the model as a `Strategy`
 
-`@register("lstm")`. It loads a registered model in `__init__` (the only place,
-with `on_bar`, that touches torch), sets `warmup = window + feature_warmup`, and
-each bar:
+`trader.strategies.model_base.ModelStrategy` is the shared base;
+`LSTMStrategy` (`@register("lstm")`) and `GBMStrategy` (`@register("gbm")`) each
+add only a `_require_deps` and a `_predict_proba`. The base loads a registered
+model in `__init__` via `load_model` (the only place, with `on_bar`, that touches
+the model deps), sets `warmup = window + feature_warmup`, and each bar:
 
 1. recompute features from `ctx.history` using the model's **frozen**
    `FeatureSpec` — closed bars only, so it stays causal;
-2. take the last `window` rows, apply the saved scaler, run the net, softmax;
-3. `edge = p(up) - p(down)`. `edge > threshold` → `Target(+weight, **barriers)`;
+2. take the last `window` rows, apply the saved scaler, and reshape per the
+   manifest `layout` (`(1, window, F)` for the LSTM, `(1, window * F)` for the
+   GBM);
+3. `_predict_proba` → class probabilities (torch softmax / `Booster.predict`);
+   `edge = p(up) - p(down)`. `edge > threshold` → `Target(+weight, **barriers)`;
    `edge < -threshold` → the short; otherwise `Hold()` (or `Flat()` if
    `on_no_signal="flat"`).
 
@@ -149,6 +186,14 @@ trader backtest --symbol AAPL:xnas --asset-type Stock --strategy lstm --param mo
 # or sweep configs by walk-forward CV instead of a single train:
 trader tune --symbol AAPL:xnas --asset-type Stock --horizon 15m --context 1h,4h --feature-set mtf_v1 \
             --grid window=16,32 --grid stop=0.004,0.008 --folds 5 --fee-bps 0.2 --spread-bps 1.0 --out state/sweep.json
+
+# a LightGBM sweep on the same folds (trains in seconds):
+trader tune --symbol AAPL:xnas --asset-type Stock --strategy gbm --model-type gbm --horizon 15m \
+            --grid num_leaves=31,63 --grid lr=0.03,0.1 --grid threshold=0.1,0.2 --folds 5 --fee-bps 0.2
+
+# and a classical baseline through the exact same harness:
+trader tune --symbol AAPL:xnas --asset-type Stock --strategy orb --horizon 1m \
+            --grid open_minutes=5,15,30 --grid stop=0.002,0.004 --grid long_only=true,false --folds 4
 ```
 
 The API mirrors this: `POST /api/training` (a job on the same store as

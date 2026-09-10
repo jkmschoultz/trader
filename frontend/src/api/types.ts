@@ -185,12 +185,15 @@ export interface FeatureSetInfo {
   context_capable: boolean;
 }
 
+export type ModelType = "lstm" | "gbm";
+
 export interface TrainingSpec {
   symbols: string[];
   uics?: number[];
   asset_type?: string | null;
   exchange?: string | null;
   name?: string;
+  model_type?: ModelType;
   horizon?: number | string;
   context_horizons?: (number | string)[];
   feature_set?: string;
@@ -203,12 +206,21 @@ export interface TrainingSpec {
   val_end: string;
   embargo_bars?: number | null;
   since?: string | null;
+  // LSTM
   hidden?: number;
   layers?: number;
   dropout?: number;
   bidirectional?: boolean;
   epochs?: number;
   batch_size?: number;
+  // GBM (LightGBM)
+  num_leaves?: number;
+  n_estimators?: number;
+  max_depth?: number;
+  min_child_samples?: number;
+  subsample?: number;
+  colsample_bytree?: number;
+  // shared
   lr?: number;
   use_sample_weights?: boolean;
   seed?: number;
@@ -218,6 +230,7 @@ export interface ModelSummary {
   id: string;
   name: string;
   created_at: string;
+  model_type: ModelType;
   horizon: number;
   context_horizons: number[];
   feature_set: string;
@@ -231,6 +244,8 @@ export interface ModelInfo {
   id: string;
   name: string;
   created_at: string;
+  model_type: ModelType;
+  layout: "sequence" | "tabular";
   base_horizon: number;
   context_horizons: number[];
   feature_set: string;
@@ -300,6 +315,10 @@ export type GridValue = number | string | boolean;
 export interface TuningSpec {
   base: TuningBase;
   cv: CVConfigSpec;
+  /** "lstm" | "gbm" for a model sweep; any other registered strategy for a classical one. */
+  strategy?: string;
+  /** fixed constructor args for a classical-strategy sweep. */
+  params?: Record<string, unknown>;
   grid: Record<string, GridValue[]>;
   top_k?: number;
   max_workers?: number;
@@ -341,9 +360,11 @@ export interface TuningRow {
 export interface TuningReport {
   measured_at: string;
   finished_at: string;
+  strategy?: string;
   symbols: string[];
   horizon: number;
-  feature_set: string;
+  feature_set: string | null;
+  params?: Record<string, unknown> | null;
   grid: Record<string, GridValue[]>;
   n_configs: number;
   n_errored: number;

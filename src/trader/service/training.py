@@ -29,6 +29,10 @@ class TrainingSpec(BaseModel):
     asset_type: str | None = None
     exchange: str | None = None
     name: str = "lstm"
+    #: which model family to train: ``"lstm"`` (torch sequence) or ``"gbm"``
+    #: (LightGBM on the flattened lag stack). Picks the trainer, the feature
+    #: layout, and the registry weights format.
+    model_type: Literal["lstm", "gbm"] = "lstm"
 
     horizon: int = 5
     context_horizons: list[int] = Field(default_factory=list)
@@ -47,16 +51,29 @@ class TrainingSpec(BaseModel):
     embargo_bars: int | None = Field(default=None, ge=0)
     since: datetime | None = None
 
+    # --- LSTM hyperparameters ---
     hidden: int = Field(default=64, ge=1)
     layers: int = Field(default=2, ge=1)
     dropout: float = Field(default=0.2, ge=0, lt=1)
     bidirectional: bool = False
     epochs: int = Field(default=40, ge=1)
     batch_size: int = Field(default=128, ge=1)
-    lr: float = Field(default=1e-3, gt=0)
+    # --- GBM (LightGBM) hyperparameters ---
+    num_leaves: int = Field(default=31, ge=2)
+    n_estimators: int = Field(default=400, ge=1)
+    max_depth: int = Field(default=-1)
+    min_child_samples: int = Field(default=20, ge=1)
+    subsample: float = Field(default=0.8, gt=0, le=1)
+    colsample_bytree: float = Field(default=0.8, gt=0, le=1)
+    # --- shared ---
+    lr: float = Field(default=1e-3, gt=0)  # LSTM Adam lr / GBM learning_rate
     class_weight: str | None = "balanced"
     use_sample_weights: bool = False
     seed: int = 0
+
+    @property
+    def layout(self) -> str:
+        return "tabular" if self.model_type == "gbm" else "sequence"
 
     @field_validator("horizon", "context_horizons", mode="before")
     @classmethod
@@ -172,6 +189,8 @@ async def run_training(
         split=split,
         config=config,
         report=train_report,
+        model_type=spec.model_type,
+        layout=spec.layout,
         data_spec={
             "symbols": spec.symbols,
             "uics": spec.uics,
@@ -181,8 +200,6 @@ async def run_training(
         },
         optimiser={
             "lr": spec.lr,
-            "batch_size": spec.batch_size,
-            "epochs": spec.epochs,
             "class_weight": spec.class_weight,
             "use_sample_weights": spec.use_sample_weights,
             "seed": spec.seed,
@@ -216,15 +233,14 @@ async def run_cv(
         SeriesNotStored: the lake holds nothing for one of the symbols.
     """
     import shutil
-    import statistics
     import tempfile
     from pathlib import Path
 
     from trader import backtest as bt
-    from trader.data import bars as bars_mod
     from trader.models.dataset import time_split, walk_forward_splits
     from trader.models.registry import ModelRegistry
-    from trader.strategies.lstm import LSTMStrategy
+    from trader.service.evaluation import aggregate_folds, score_fold
+    from trader.strategies import get_strategy
 
     def report_progress(value: float) -> None:
         if progress is not None:
@@ -287,34 +303,26 @@ async def run_cv(
                 split=split,
                 config=config,
                 report=train_report,
+                model_type=spec.model_type,
+                layout=spec.layout,
                 data_spec={"symbols": spec.symbols, "horizon": spec.horizon},
             )
-            strategy = LSTMStrategy(
+            strategy = get_strategy(spec.model_type)(
                 model=info.id,
                 threshold=cv.threshold,
                 on_no_signal=cv.on_no_signal,
                 models_dir=str(tmp),
             )
-            lookback = _fold_lookback(spec, strategy.warmup)
-            panel: dict[str, Any] = {}
-            instruments: dict[str, Any] = {}
-            for s in series:
-                clipped = bars_mod.clip(s.frame, start=split.val_end - lookback, end=split.test_end)
-                if len(clipped) <= strategy.warmup:
-                    continue
-                panel[s.label] = clipped
-                instruments[s.label] = bt.Instrument(key=s.key, session=s.session)
-            if not panel:
-                raise InvalidRequest(f"fold {i + 1}: test window shorter than the model warmup")
-
-            result = bt.run(
-                panel,
+            metrics = score_fold(
+                series,
                 strategy,
                 horizon=spec.horizon,
+                val_end=split.val_end,
+                test_end=split.test_end,
+                lookback=_fold_lookback(spec, strategy.warmup),
                 allocator=allocator,
                 cost_model=cost_model,
-                instruments=instruments,
-                leverage_cap=cv.leverage,
+                leverage=cv.leverage,
             )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -327,44 +335,14 @@ async def run_cv(
                 "test_end": split.test_end.isoformat() if split.test_end else None,
                 "val_macro_f1": train_report.metrics.get("val_macro_f1"),
                 "test_macro_f1": train_report.metrics.get("test_macro_f1"),
-                "metrics": result.metrics.as_dict(),
+                "metrics": metrics,
             }
         )
     report_progress(0.98)
 
-    def _agg(key: str) -> dict[str, float]:
-        vals = [
-            f["metrics"][key]
-            for f in folds
-            if f["metrics"].get(key) is not None and _finite(f["metrics"][key])
-        ]
-        if not vals:
-            return {"median": float("nan"), "mean": float("nan"), "std": float("nan")}
-        return {
-            "median": statistics.median(vals),
-            "mean": statistics.fmean(vals),
-            "std": statistics.pstdev(vals) if len(vals) > 1 else 0.0,
-        }
-
-    sharpes = [f["metrics"]["sharpe"] for f in folds if _finite(f["metrics"].get("sharpe"))]
-    aggregate = {
-        "n_folds": len(folds),
-        "folds_sharpe_gt_0_5": sum(1 for s in sharpes if s > 0.5),
-        "worst_fold_sharpe": min(sharpes) if sharpes else float("nan"),
-        "sharpe": _agg("sharpe"),
-        "total_return": _agg("total_return"),
-        "turnover": _agg("turnover"),
-        "hit_rate": _agg("hit_rate"),
-        "profit_factor": _agg("profit_factor"),
-    }
+    aggregate = aggregate_folds([f["metrics"] for f in folds])
     report_progress(1.0)
     return {"folds": folds, "aggregate": aggregate}
-
-
-def _finite(value: object) -> bool:
-    import math
-
-    return isinstance(value, (int, float)) and math.isfinite(value)
 
 
 def _fold_lookback(spec: TrainingSpec, warmup: int):
@@ -384,12 +362,12 @@ async def _build_dataset(settings: Settings, spec: TrainingSpec):
 
     from trader.features.registry import UnknownFeatureSet, get_feature_set
     from trader.labels.triple_barrier import LabelConfig
-    from trader.models._optional import require_torch
+    from trader.models._optional import require_lightgbm, require_torch
     from trader.models.dataset import SequenceBundle, WindowSpec, build_bundle
     from trader.service._panel import load_panel
 
     try:
-        require_torch()
+        require_lightgbm() if spec.model_type == "gbm" else require_torch()
     except ValueError as exc:
         raise InvalidRequest(str(exc)) from exc
     try:
@@ -416,6 +394,7 @@ async def _build_dataset(settings: Settings, spec: TrainingSpec):
         base_horizon=spec.horizon,
         context_horizons=tuple(spec.context_horizons),
         label=label,
+        layout=spec.layout,
     )
 
     bundles = []
@@ -442,12 +421,40 @@ async def _build_dataset(settings: Settings, spec: TrainingSpec):
 def _fit_fold(merged, tr, va, te, spec: TrainingSpec, *, progress=None):
     """Fit the scaler on the train mask and train one model. Returns
     ``(model, scaler, config, train_report)``."""
-    from trader.models.lstm import LSTMConfig
     from trader.models.scaler import StandardScaler
-    from trader.models.training import train_model
 
     X, y, w = merged.X, merged.y, merged.w
     scaler = StandardScaler().fit(X[tr])
+
+    if spec.model_type == "gbm":
+        from trader.models.gbm import GBMConfig, train_gbm
+
+        config = GBMConfig(
+            num_leaves=spec.num_leaves,
+            max_depth=spec.max_depth,
+            learning_rate=spec.lr,
+            n_estimators=spec.n_estimators,
+            min_child_samples=spec.min_child_samples,
+            subsample=spec.subsample,
+            colsample_bytree=spec.colsample_bytree,
+        )
+        model, train_report = train_gbm(
+            scaler.transform(X[tr]),
+            y[tr],
+            w[tr],
+            scaler.transform(X[va]),
+            y[va],
+            config=config,
+            class_weight=spec.class_weight,
+            use_sample_weights=spec.use_sample_weights,
+            seed=spec.seed,
+            progress=progress,
+        )
+        return model, scaler, config, train_report
+
+    from trader.models.lstm import LSTMConfig
+    from trader.models.training import train_model
+
     config = LSTMConfig(
         n_features=X.shape[-1],
         hidden=spec.hidden,

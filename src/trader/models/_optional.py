@@ -36,3 +36,12 @@ def require_sklearn_metrics():
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise ValueError(f"this needs the optional model dependencies ({exc}); {_HINT}") from exc
     return confusion_matrix, f1_score
+
+
+def require_lightgbm():
+    """Import and return :mod:`lightgbm`, or raise with an install hint."""
+    try:
+        import lightgbm
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise ValueError(f"this needs the optional model dependencies ({exc}); {_HINT}") from exc
+    return lightgbm
