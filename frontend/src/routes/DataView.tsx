@@ -11,6 +11,10 @@ import type { SeriesInfo } from "../api/types";
 
 const fmt = (s: string) => s.replace("T", " ").slice(0, 16);
 
+// "US500.I:CfdOnIndex:4913 @ 1m", or the bare key until a symbol is recorded.
+const seriesLabel = (s: SeriesInfo) =>
+  `${s.symbol ? `${s.symbol}:` : ""}${s.asset_type}:${s.uic} @ ${s.horizon_label}`;
+
 // Bar sizes Saxo serves, labelled as parse_horizon accepts them.
 const HORIZON_OPTIONS = [
   { value: "1m", label: "1m" },
@@ -115,18 +119,67 @@ function BackfillPanel({ onDone }: { onDone: () => void }) {
   );
 }
 
+function SymbolsButton({ missing, onDone }: { missing: number; onDone: () => void }) {
+  const [jobId, setJobId] = useStickyJobId("job:symbols");
+  const [error, setError] = useState<string | null>(null);
+  const job = useJob(jobId);
+
+  useEffect(() => {
+    if (job?.status === "done") onDone();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.status]);
+
+  const inFlight = jobId != null && job?.status !== "done" && job?.status !== "error";
+
+  const run = async () => {
+    setError(null);
+    try {
+      const { job_id } = await api.refreshSymbols();
+      setJobId(job_id);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <button
+        onClick={run}
+        disabled={inFlight}
+        className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:hover:bg-slate-900"
+      >
+        {inFlight ? "Fetching symbols…" : "Fetch symbols from Saxo"}
+      </button>
+      {missing > 0 && !inFlight && (
+        <span className="text-xs text-slate-500">{missing} uic(s) without a symbol</span>
+      )}
+      {error && <span className="text-xs text-red-600">{error}</span>}
+      {jobId && <JobProgress job={job} />}
+    </div>
+  );
+}
+
 export function DataView() {
   const series = useSeries();
   const [selected, setSelected] = useState<SeriesInfo | null>(null);
   const bars = useBars(
     selected ? { asset_type: selected.asset_type, uic: selected.uic, horizon: selected.horizon } : null,
   );
+  const missingSymbols = new Set(
+    (series.data ?? []).filter((s) => !s.symbol).map((s) => `${s.asset_type}:${s.uic}`),
+  ).size;
 
   return (
     <div className="space-y-4">
       <BackfillPanel onDone={() => series.refetch()} />
 
       <div className="overflow-x-auto">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Stored series</h3>
+          {(series.data?.length ?? 0) > 0 && (
+            <SymbolsButton missing={missingSymbols} onDone={() => series.refetch()} />
+          )}
+        </div>
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-slate-300 text-left text-slate-500 dark:border-slate-700">
@@ -148,9 +201,7 @@ export function DataView() {
                     active ? "bg-blue-50 dark:bg-blue-950" : "hover:bg-slate-50 dark:hover:bg-slate-900"
                   }`}
                 >
-                  <td className="py-1 pr-4">
-                    {s.asset_type}:{s.uic} @ {s.horizon_label}
-                  </td>
+                  <td className="py-1 pr-4">{seriesLabel(s)}</td>
                   <td className="py-1 pr-4 text-right">{s.rows.toLocaleString()}</td>
                   <td className="py-1 pr-4">{fmt(s.first)}</td>
                   <td className="py-1 pr-4">{fmt(s.last)}</td>
@@ -171,9 +222,7 @@ export function DataView() {
       {selected && (
         <section className="space-y-2">
           <div className="flex items-baseline justify-between">
-            <h3 className="text-sm font-semibold">
-              {selected.asset_type}:{selected.uic} @ {selected.horizon_label}
-            </h3>
+            <h3 className="text-sm font-semibold">{seriesLabel(selected)}</h3>
             {bars.data && (
               <span className="text-xs text-slate-500">
                 {bars.data.returned.toLocaleString()} of {bars.data.rows.toLocaleString()} bars

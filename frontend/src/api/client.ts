@@ -89,6 +89,11 @@ export const api = {
       body: JSON.stringify(spec),
     }),
 
+  refreshSymbols: (refresh = false) =>
+    request<{ job_id: string }>(`/lake/symbols?refresh=${refresh ? "true" : "false"}`, {
+      method: "POST",
+    }),
+
   submitTraining: (spec: TrainingSpec) =>
     request<{ job_id: string }>("/training", {
       method: "POST",

@@ -63,6 +63,13 @@ def test_backfill_accepts_several_horizons():
     assert args.horizon == "1m,5m,1h"
 
 
+def test_data_symbols_parses_the_refresh_flag():
+    args = _build_parser().parse_args(["data", "symbols", "--refresh"])
+    assert args.data_command == "symbols"
+    assert args.refresh is True
+    assert _build_parser().parse_args(["data", "symbols"]).refresh is False
+
+
 def test_depth_has_a_conservative_default_page_cap():
     """The spike should not pull a month of 1-minute bars unless asked to."""
     args = _build_parser().parse_args(["data", "depth", "AAPL:xnas"])
@@ -124,7 +131,28 @@ def test_coverage_lists_stored_series(capsys, monkeypatch, tmp_path):
 
     monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path))
     assert main(["data", "coverage"]) == 0
-    assert "Stock:211@1m" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Stock:211@1m" in out
+    # no symbol recorded yet -> the command points at the fix
+    assert "trader data symbols" in out
+
+
+def test_coverage_shows_the_symbol_once_the_registry_knows_it(capsys, monkeypatch, tmp_path):
+    from trader.data.instruments import InstrumentRegistry
+    from trader.data.lake import BarLake, SeriesKey, bars_to_frame
+    from trader.saxo.charts import Bar
+
+    BarLake(tmp_path).write(
+        SeriesKey("CfdOnIndex", 4913, 1),
+        bars_to_frame(
+            [Bar(Time=datetime(2024, 3, 1, tzinfo=UTC), open=1.0, high=1.0, low=1.0, close=1.0)]
+        ),
+    )
+    InstrumentRegistry(tmp_path).put("CfdOnIndex", 4913, symbol="US500.I")
+
+    monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path))
+    assert main(["data", "coverage"]) == 0
+    assert "US500.I:CfdOnIndex:4913@1m" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------- backtest

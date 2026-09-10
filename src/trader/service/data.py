@@ -30,6 +30,7 @@ __all__ = [
     "SeriesInfo",
     "lake_series",
     "read_bars",
+    "refresh_symbols",
     "run_backfill",
     "search_instruments",
 ]
@@ -47,6 +48,9 @@ class SeriesInfo:
     first: datetime
     last: datetime
     files: int
+    # Saxo symbol for this uic, from the instrument registry. "" until a
+    # backfill or `trader data symbols` has recorded it.
+    symbol: str = ""
 
 
 @dataclass(frozen=True)
@@ -60,10 +64,12 @@ class InstrumentHit:
 
 def lake_series(settings: Settings) -> list[SeriesInfo]:
     """Every stored series with its coverage, sorted by key."""
+    from trader.data.instruments import InstrumentRegistry
     from trader.data.lake import BarLake
     from trader.saxo.charts import horizon_label
 
     store = BarLake(settings.data_dir)
+    registry = InstrumentRegistry(settings.data_dir)
     out: list[SeriesInfo] = []
     for key in store.series():
         coverage = store.coverage(key)
@@ -79,6 +85,7 @@ def lake_series(settings: Settings) -> list[SeriesInfo]:
                 first=coverage.first,
                 last=coverage.last,
                 files=coverage.files,
+                symbol=registry.symbol_for(key.asset_type, key.uic),
             )
         )
     return out
@@ -188,6 +195,61 @@ async def search_instruments(
     ]
 
 
+async def _record_instrument(client: Any, registry: Any, uic: int, asset_type: str) -> None:
+    """Fetch reference data for one uic and store it. Never fatal to a backfill."""
+    from trader.saxo.client import SaxoAPIError
+    from trader.saxo.instruments import get_details
+
+    try:
+        details = await get_details(client, int(uic), asset_type)
+    except (SaxoAPIError, LookupError) as exc:
+        log.warning("could not fetch reference data for %s:%s: %s", asset_type, uic, exc)
+        return
+    registry.put(
+        asset_type,
+        uic,
+        symbol=details.symbol,
+        description=details.description,
+        currency=details.currency,
+        exchange_id=details.exchange_id,
+    )
+
+
+async def refresh_symbols(
+    settings: Settings,
+    *,
+    refresh: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> list[Any]:
+    """Fill the instrument registry from Saxo for every uic in the lake.
+
+    By default only uics with no recorded symbol are fetched; ``refresh=True``
+    re-fetches every one. Returns the resulting records, sorted by key.
+    """
+    from trader.data.instruments import InstrumentRegistry
+    from trader.data.lake import BarLake
+    from trader.saxo.client import SaxoClient
+
+    store = BarLake(settings.data_dir)
+    registry = InstrumentRegistry(settings.data_dir)
+
+    pairs = sorted({(key.asset_type, key.uic) for key in store.series()})
+    todo = [
+        (asset_type, uic)
+        for asset_type, uic in pairs
+        if refresh or not registry.symbol_for(asset_type, uic)
+    ]
+
+    if todo:
+        async with SaxoClient(settings) as client:
+            for asset_type, uic in todo:
+                await _record_instrument(client, registry, uic, asset_type)
+                if progress is not None:
+                    progress(f"{registry.label(asset_type, uic)}")
+
+    return registry.records()
+
+
 class BackfillSpec(BaseModel):
     """What to fetch into the lake. ``horizons`` accepts labels or minutes."""
 
@@ -232,11 +294,13 @@ async def run_backfill(
     ``progress`` is called with a short status line after each committed page.
     """
     from trader.data import ingest
+    from trader.data.instruments import InstrumentRegistry
     from trader.data.lake import BarLake, SeriesKey
     from trader.saxo.client import SaxoClient
     from trader.service.instruments import resolve_symbol
 
     store = BarLake(settings.data_dir)
+    registry = InstrumentRegistry(settings.data_dir)
     summaries: list[dict[str, Any]] = []
 
     async with SaxoClient(settings) as client:
@@ -248,8 +312,17 @@ async def run_backfill(
                 prefer=[e for e in (spec.exchange, *settings.saxo.preferred_exchanges) if e],
             )
             uic, asset_type = instrument.uic, instrument.asset_type
+            registry.put(
+                asset_type,
+                uic,
+                symbol=instrument.symbol,
+                description=instrument.description,
+                currency=instrument.currency,
+                exchange_id=instrument.exchange_id,
+            )
         else:
             uic, asset_type = spec.uic, (spec.asset_type or "Stock")
+            await _record_instrument(client, registry, uic, asset_type)
 
         for horizon in spec.horizons:
             key = SeriesKey(asset_type, int(uic), horizon)

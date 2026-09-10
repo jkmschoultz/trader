@@ -10,6 +10,7 @@
     trader data depth SYMBOL          # how much history Saxo serves
     trader data backfill SYMBOL       # fetch bars into the Parquet lake
     trader data coverage              # what the lake holds
+    trader data symbols               # fetch Saxo symbols for every stored uic
     trader data sessions SYMBOL       # inferred trading hours and real gaps
 
     trader backtest --symbol SYMBOL --strategy NAME   # run a strategy over stored bars
@@ -324,13 +325,23 @@ async def _cmd_data_depth(settings: Settings, args) -> int:
 
 async def _cmd_data_backfill(settings: Settings, args) -> int:
     _, _, _, ingest, lake_mod = _require_data_extra()
+    from trader.data.instruments import InstrumentRegistry  # noqa: PLC0415
 
     horizons = [parse_horizon(h) for h in args.horizon.split(",")]
     since = _parse_since(args.since)
 
     store = lake_mod.BarLake(settings.data_dir)
+    registry = InstrumentRegistry(settings.data_dir)
     async with SaxoClient(settings) as client:
         instrument = await _resolve(client, args.symbol, args.asset_type)
+        registry.put(
+            instrument.asset_type,
+            instrument.uic,
+            symbol=instrument.symbol,
+            description=instrument.description,
+            currency=instrument.currency,
+            exchange_id=instrument.exchange_id,
+        )
         print(f"{instrument.symbol} -> uic {instrument.uic} ({instrument.asset_type})")
         if since:
             print(f"Fetching back to {since:%Y-%m-%d %H:%M} UTC into {store.root}\n")
@@ -357,25 +368,57 @@ async def _cmd_data_backfill(settings: Settings, args) -> int:
         key = lake_mod.SeriesKey(instrument.asset_type, instrument.uic, horizon)
         coverage = store.coverage(key)
         if coverage:
-            print(coverage)
+            print(lake_mod.coverage_line(coverage, instrument.symbol))
     return 0
 
 
 def _cmd_data_coverage(settings: Settings, args) -> int:
     _, _, _, _, lake_mod = _require_data_extra()
+    from trader.data.instruments import InstrumentRegistry  # noqa: PLC0415
 
     store = lake_mod.BarLake(settings.data_dir)
+    registry = InstrumentRegistry(settings.data_dir)
     keys = store.series()
     if not keys:
         print(f"No series stored under {store.root}. Run: trader data backfill SYMBOL")
         return 1
 
+    unnamed = {(k.asset_type, k.uic) for k in keys if not registry.symbol_for(k.asset_type, k.uic)}
+
     print(f"Lake: {store.root}\n")
     for key in keys:
         coverage = store.coverage(key)
         if coverage:
-            print(coverage)
+            print(lake_mod.coverage_line(coverage, registry.symbol_for(key.asset_type, key.uic)))
     print(f"\n{len(keys)} series.")
+    if unnamed:
+        print(
+            f"{len(unnamed)} uic(s) have no symbol yet. Run: trader data symbols"
+        )
+    return 0
+
+
+async def _cmd_data_symbols(settings: Settings, args) -> int:
+    _require_data_extra()
+    from trader.data.instruments import InstrumentRegistry  # noqa: PLC0415
+    from trader.service.data import refresh_symbols  # noqa: PLC0415
+
+    records = await refresh_symbols(
+        settings, refresh=args.refresh, progress=lambda msg: print(f"  fetched {msg}")
+    )
+    if not records:
+        print("The lake is empty. Run: trader data backfill SYMBOL")
+        return 1
+
+    width = max((len(r.symbol) for r in records if r.symbol), default=1)
+    for record in records:
+        symbol = record.symbol or "?"
+        updated = f"{record.updated:%Y-%m-%d}" if record.updated else "-"
+        print(
+            f"{symbol:<{width}}  {record.asset_type:<14} uic {record.uic:<9} "
+            f"{record.currency:<4} {updated}  {record.description}"
+        )
+    print(f"\n{len(records)} instruments in {InstrumentRegistry(settings.data_dir).path}")
     return 0
 
 
@@ -973,6 +1016,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     data_sub.add_parser("coverage", help="what the lake currently holds")
 
+    symbols_p = data_sub.add_parser(
+        "symbols", help="fetch Saxo symbols for every uic in the lake"
+    )
+    symbols_p.add_argument(
+        "--refresh",
+        action="store_true",
+        help="re-fetch every uic, not only those with no recorded symbol",
+    )
+
     sessions_p = data_sub.add_parser("sessions", help="inferred trading hours and real gaps")
     sessions_p.add_argument("symbol")
     sessions_p.add_argument("--asset-type")
@@ -1203,6 +1255,8 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_cmd_data_backfill(settings, args))
             if args.data_command == "coverage":
                 return _cmd_data_coverage(settings, args)
+            if args.data_command == "symbols":
+                return asyncio.run(_cmd_data_symbols(settings, args))
             if args.data_command == "sessions":
                 return asyncio.run(_cmd_data_sessions(settings, args))
         elif args.command == "backtest":

@@ -28,6 +28,7 @@ export interface SeriesInfo {
   first: string;
   last: string;
   files: number;
+  symbol: string; // Saxo symbol for this uic, "" until recorded
 }
 
 export interface Bar {

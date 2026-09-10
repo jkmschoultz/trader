@@ -8,6 +8,7 @@ import pytest
 import respx
 
 from trader.config import Settings
+from trader.data.instruments import InstrumentRegistry
 from trader.data.lake import BarLake, SeriesKey
 from trader.service.data import BackfillSpec, run_backfill
 
@@ -38,6 +39,12 @@ def _one_bar_page() -> httpx.Response:
 @respx.mock
 async def test_fetches_each_horizon_and_reports_progress(net_settings):
     chart = respx.get(f"{GATEWAY}/chart/v3/charts").mock(return_value=_one_bar_page())
+    respx.get(f"{GATEWAY}/ref/v1/instruments/details/211/Stock").mock(
+        return_value=httpx.Response(
+            200, json={"Uic": 211, "Symbol": "AAPL:xnas", "AssetType": "Stock",
+                       "CurrencyCode": "USD", "Description": "Apple Inc."}
+        )
+    )
     messages: list[str] = []
 
     spec = BackfillSpec(
@@ -46,6 +53,8 @@ async def test_fetches_each_horizon_and_reports_progress(net_settings):
     summaries = await run_backfill(net_settings, spec, progress=messages.append)
 
     assert chart.called
+    # the uic was recorded against its Saxo symbol
+    assert InstrumentRegistry(net_settings.data_dir).symbol_for("Stock", 211) == "AAPL:xnas"
     assert [s["key"] for s in summaries] == ["Stock:211@1m", "Stock:211@5m"]
     assert all(s["pages"] >= 1 and s["bars_fetched"] >= 1 for s in summaries)
 

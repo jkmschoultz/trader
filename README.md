@@ -57,6 +57,7 @@ happens, `TRADER_SAXO__OAUTH_FLOW=pkce|secret` forces the choice.
 .venv/bin/trader data depth AAPL:xnas --asset-type Stock    # how far back Saxo actually serves bars
 .venv/bin/trader data backfill AAPL:xnas --asset-type Stock --horizon 1m,5m --since 90d
 .venv/bin/trader data coverage                  # what the local Parquet lake holds
+.venv/bin/trader data symbols                    # fetch Saxo symbols for every stored uic
 .venv/bin/trader data sessions AAPL:xnas --asset-type Stock # inferred trading hours, real gaps
 
 .venv/bin/trader backtest --symbol AAPL:xnas --symbol MSFT:xnas --asset-type Stock \
@@ -161,6 +162,12 @@ so replaying a backfill costs time and nothing else. `trader data backfill` comm
 it lands, so an interrupted run loses at most the page in flight and a re-run picks up from what
 is already stored, in both directions (topping up recent bars, and extending further into the
 past).
+
+**Series are keyed by Uic, labelled by symbol.** Partition paths stay numeric because a Saxo
+symbol can be reassigned while a Uic cannot. `data/instruments.json` is the side table that maps
+each `(asset_type, uic)` back to its symbol; a backfill records it automatically, and
+`trader data symbols` fills it in for a lake seeded before this existed. Coverage then reads
+`US500.I:CfdOnIndex:4913@1m: …` rather than the bare key.
 
 **The backtest engine cannot look ahead.** A strategy decides on the bar that just closed and
 the fill lands at the next bar's open — a price knowable at that instant. Bracket exits are

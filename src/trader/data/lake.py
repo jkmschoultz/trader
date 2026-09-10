@@ -93,11 +93,24 @@ class Coverage:
     files: int
 
     def __str__(self) -> str:
-        return (
-            f"{self.key}: {self.rows:,} bars "
-            f"{self.first:%Y-%m-%d %H:%M} -> {self.last:%Y-%m-%d %H:%M} UTC "
-            f"({self.files} file{'s' if self.files != 1 else ''})"
-        )
+        return coverage_line(self)
+
+
+def coverage_line(coverage: Coverage, symbol: str = "") -> str:
+    """One-line coverage summary, optionally symbol-prefixed.
+
+    ``symbol`` comes from :mod:`trader.data.instruments`, which the lake itself
+    does not depend on -- callers that have a registry pass the label through,
+    everyone else gets the bare ``asset_type:uic@horizon`` form.
+    """
+    key = coverage.key
+    head = f"{symbol}:" if symbol else ""
+    return (
+        f"{head}{key.asset_type}:{key.uic}@{horizon_label(key.horizon)}: "
+        f"{coverage.rows:,} bars "
+        f"{coverage.first:%Y-%m-%d %H:%M} -> {coverage.last:%Y-%m-%d %H:%M} UTC "
+        f"({coverage.files} file{'s' if coverage.files != 1 else ''})"
+    )
 
 
 @dataclass(frozen=True)
