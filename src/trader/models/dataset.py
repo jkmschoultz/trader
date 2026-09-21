@@ -183,7 +183,9 @@ def build_bundle(
         strided = scaler.transform(strided)
 
     return SequenceBundle(
-        X=strided.astype(np.float32),
+        # already float32 by construction (and after scaler.transform) -- copy=False
+        # avoids a second full-size allocation of X, which matters on 1m panels.
+        X=strided.astype(np.float32, copy=False),
         y=y,
         w=w,
         t=times_ns.astype(np.int64),
