@@ -171,8 +171,9 @@ each `(asset_type, uic)` back to its symbol; a backfill records it automatically
 
 **The backtest engine cannot look ahead.** A strategy decides on the bar that just closed and
 the fill lands at the next bar's open — a price knowable at that instant. Bracket exits are
-checked intrabar against `high`/`low`, and when one bar spans both the stop and the target the
-stop wins, which biases bracketed strategies down (the safe direction). Strategies emit a
+checked intrabar against `high`/`low`; a bar that opens beyond a barrier (an overnight gap)
+exits at that open rather than at the barrier, and when one bar spans both the stop and the
+target the stop wins, which biases bracketed strategies down (the safe direction). Strategies emit a
 conviction in `[-1, 1]`; an `Allocator` turns the book's convictions into equity-fraction
 weights under a leverage cap. See [docs/backtest.md](docs/backtest.md).
 

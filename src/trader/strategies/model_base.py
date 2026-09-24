@@ -16,10 +16,14 @@ the model is fed an ``(1, window, F)`` sequence or a flat ``(1, window*F)`` row.
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from trader.strategies.base import BarContext, Decision, Flat, Hold, InstrumentStrategy, Target
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 # ``on_bar`` only needs the last ``window`` feature rows, and every indicator's
 # lookback is bounded by ``FeatureSpec.warmup``. Recomputing over the whole
@@ -53,6 +57,8 @@ class ModelStrategy(InstrumentStrategy):
         on_no_signal: Literal["hold", "flat"] = "hold",
         models_dir: str | None = None,
     ) -> None:
+        import pandas as pd
+
         from trader.config import get_settings
         from trader.features.base import FeatureSpec
         from trader.labels.triple_barrier import target_from_barrier_params
@@ -77,11 +83,64 @@ class ModelStrategy(InstrumentStrategy):
         base = self._spec.base_horizon
         ratio = max((-(-h // base) for h in self._spec.context_horizons), default=1)
         self._tail = self.warmup + _TAIL_PAD * ratio
+        # level features (prior day / week) reach back a wall-clock span, which
+        # is a different bar count for 24h FX and a 6.5h equity session
+        self._tail_span = (
+            pd.Timedelta(days=self._spec.level_days) if self._spec.level_days else None
+        )
 
         self._threshold = float(threshold)
         self._weight = float(weight)
         self._flat_on_no_signal = on_no_signal == "flat"
         self._barrier = target_from_barrier_params(self._info.barriers) if bracket else {}
+        # label -> (bar times as int64 ns, feature rows); see use_precomputed
+        self._precomputed: dict[str, tuple] = {}
+
+    def use_precomputed(self, features: Mapping[str, pd.DataFrame]) -> None:
+        """Serve ``on_bar`` from feature frames computed once over each full series.
+
+        ``features`` maps an instrument label to ``compute_feature_frame`` output
+        for that label's whole bar frame, built with this model's frozen spec.
+        Features are causal, so row ``i`` of a full-history compute is exactly
+        what a recompute at bar ``i`` would give (minus the tail's EWM burn-in
+        drift) -- this turns a fold backtest from one pipeline run per bar into
+        a lookup. A bar whose time is not in the frame falls back to recomputing.
+        """
+        import pandas as pd
+
+        # the lake stores microsecond times: normalise to ns so lookups compare
+        # against Timestamp.value, which is always ns
+        self._precomputed = {
+            label: (
+                pd.DatetimeIndex(frame.index).as_unit("ns").asi8,
+                frame.to_numpy(dtype="float32"),
+            )
+            for label, frame in features.items()
+        }
+
+    def _window_rows(self, ctx: BarContext):
+        """The last ``window`` feature rows as of ``ctx``'s most recent closed bar."""
+        import numpy as np
+        import pandas as pd
+
+        cached = self._precomputed.get(ctx.label)
+        if cached is not None:
+            times, values = cached
+            last = pd.Timestamp(ctx.history["time"].iloc[-1]).value
+            end = int(np.searchsorted(times, last, side="right"))
+            if end and times[end - 1] == last:
+                return values[max(0, end - self._window) : end]
+
+        from trader.features.pipeline import compute_feature_frame
+
+        start = max(0, len(ctx.history) - self._tail)
+        if self._tail_span is not None and start:
+            times = ctx.history["time"]
+            cutoff = times.iloc[-1] - self._tail_span
+            start = min(start, int(times.searchsorted(cutoff, side="left")))
+        tail = ctx.history.iloc[start:]
+        features, _ = compute_feature_frame(tail, spec=self._spec, session=ctx.session)
+        return features.to_numpy(dtype="float32")[-self._window :]
 
     # --- subclass hooks -----------------------------------------------------
 
@@ -101,11 +160,7 @@ class ModelStrategy(InstrumentStrategy):
         if ctx.bars_seen < self.warmup:
             return Hold()
 
-        from trader.features.pipeline import compute_feature_frame
-
-        tail = ctx.history.iloc[-self._tail :]
-        features, _ = compute_feature_frame(tail, spec=self._spec, session=ctx.session)
-        window = features.to_numpy(dtype="float32")[-self._window :]
+        window = self._window_rows(ctx)
         if window.shape[0] < self._window or np.isnan(window).any():
             return Hold()
 

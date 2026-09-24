@@ -105,6 +105,11 @@ model is simpler and loses nothing.
 by default, clips gradients, early-stops on validation macro-F1, and keeps the
 best `state_dict`. It returns the best model and a JSON-safe `TrainReport` (per-
 epoch curve, val + test confusion matrices, class distribution, timings).
+`TrainingSpec.device` (`--device`, default `auto`) picks the torch device: CUDA
+when `torch.cuda.is_available()`, else CPU. The best `state_dict` is copied to
+CPU and the registry loads with `map_location="cpu"`, so a GPU-trained model
+backtests and trades on a CPU-only box. A `tune` sweep's workers each open their
+own CUDA context (~0.5 GB), so `--workers` is bounded by GPU memory, not cores.
 
 `GBMClassifier` (`--model-type gbm`) is a `lightgbm.LGBMClassifier`
 (`objective="multiclass"`, `num_class=3`) on the `layout="tabular"` lag stack.
@@ -114,6 +119,23 @@ same model-agnostic `TrainReport` (`epochs` is the boosting eval curve;
 `framework_version` records the lightgbm version). It trains in seconds, so a GBM
 sweep is the cheap yardstick a heavier model has to beat. `TrainReport` now lives
 in `trader.models.report`, importable without torch or lightgbm.
+
+`--model-type xgb` (`trader.models.xgb.train_xgb`) trains the same trees with
+XGBoost, on CUDA when there is one (`device="auto"`). It exists for speed: on a
+fold-sized problem (50k rows × 1,360 lag columns) a CUDA `hist` fit took 7 s
+against 77 s for single-threaded LightGBM, and a whole EURUSD 15m fold (build,
+train, 180-day backtest) runs in ~30 s. It takes the same `GBMConfig`, mapped as
+closely as XGBoost allows: leaf-wise growth capped at `num_leaves`;
+`min_child_samples` becomes `min_child_weight` at ×0.2 (the per-sample hessian of
+a 3-class softmax near uniform); `class_weight="balanced"` becomes per-sample
+weights. It uses the native `xgb.train` API with `num_class=3` because the
+scikit-learn wrapper rejects a fold that lacks the (rare) flat class. The booster
+is trimmed to its early-stopping best iteration before it is saved, since
+inference predicts with every tree it is given. The registry writes XGBoost's
+JSON model (`model.json`), and `load_xgb` pins prediction to the CPU, so a
+GPU-trained model trades on a box without a GPU. LightGBM's own GPU build was
+only ~1.45× faster and does not share one card well across sweep workers, so
+`gbm` stays CPU-only.
 
 ## The registry
 
@@ -168,9 +190,18 @@ caller never has to spell out where the registry lives.
 `on_bar` recomputes features from a **bounded tail** of `ctx.history` —
 `warmup + _TAIL_PAD * context_ratio` bars — not the whole slice, so a backtest is
 O(N) rather than O(N²). Features are causal, so the retained `window` rows match a
-full-history compute once the EMAs have burned in (`< 1e-5`). Deep context
-horizons still inflate `warmup` itself; an engine-level precompute is the
-follow-up there.
+full-history compute once the EMAs have burned in (`< 1e-5`).
+
+Even bounded, that is one pipeline run per bar (~60 ms for `mtf_v1`), and it was
+~90% of a walk-forward fold's wall time. `use_precomputed({label: features})`
+lets a caller hand the strategy each series' feature frame computed **once** over
+the whole series with the model's frozen spec; `on_bar` then slices the last
+`window` rows up to the current bar instead of recomputing. Causality makes the
+two equivalent — row `i` of a full-history compute depends only on bars `0..i` —
+and the precomputed rows are exactly the ones training saw. A bar whose time is
+not in the frame falls back to the recompute. `run_cv` precomputes per config, so
+a fold's backtest is a lookup (~10x faster end to end); live trading and
+`run_backtest` still recompute.
 
 ## End to end
 

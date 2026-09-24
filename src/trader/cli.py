@@ -103,14 +103,16 @@ def _require_backtest_extra():
 def _require_model_extra(model_type: str = "lstm"):
     """Import the model layer, or explain the ``[model]`` extra.
 
-    ``model_type="gbm"`` needs lightgbm; anything else needs torch. sklearn and
-    the ``trader.models`` package are needed either way.
+    ``model_type="gbm"`` needs lightgbm, ``"xgb"`` needs xgboost; anything else
+    needs torch. sklearn and the ``trader.models`` package are needed either way.
     """
     try:
         import sklearn  # noqa: F401, PLC0415
 
         if model_type == "gbm":
             import lightgbm  # noqa: F401, PLC0415
+        elif model_type == "xgb":
+            import xgboost  # noqa: F401, PLC0415
         else:
             import torch  # noqa: F401, PLC0415
 
@@ -392,9 +394,7 @@ def _cmd_data_coverage(settings: Settings, args) -> int:
             print(lake_mod.coverage_line(coverage, registry.symbol_for(key.asset_type, key.uic)))
     print(f"\n{len(keys)} series.")
     if unnamed:
-        print(
-            f"{len(unnamed)} uic(s) have no symbol yet. Run: trader data symbols"
-        )
+        print(f"{len(unnamed)} uic(s) have no symbol yet. Run: trader data symbols")
     return 0
 
 
@@ -703,6 +703,7 @@ async def _cmd_train(settings: Settings, args) -> int:
             lr=args.lr,
             use_sample_weights=args.sample_weights,
             seed=args.seed,
+            device=args.device,
         )
     except ValidationError as exc:
         raise UsageError(_first_error(exc)) from exc
@@ -756,9 +757,10 @@ def _parse_grid(items: list[str]) -> dict[str, list[object]]:
 
 
 async def _cmd_tune(settings: Settings, args) -> int:
-    is_model = args.strategy in ("lstm", "gbm")
+    is_model = args.strategy in ("lstm", "gbm", "xgb")
     if is_model:
-        _require_model_extra(args.model_type)
+        # a model sweep trains whatever --strategy names (it becomes the model_type)
+        _require_model_extra(args.strategy)
     else:
         _require_backtest_extra()
     from pathlib import Path  # noqa: PLC0415
@@ -805,6 +807,7 @@ async def _cmd_tune(settings: Settings, args) -> int:
                 lr=args.lr,
                 use_sample_weights=args.sample_weights,
                 seed=args.seed,
+                device=args.device,
             ),
             cv=dict(
                 folds=args.folds,
@@ -830,17 +833,26 @@ async def _cmd_tune(settings: Settings, args) -> int:
 
     last = [0.0]
 
+    # an in-place percentage suits a terminal; piped to a log it is noise, and
+    # the per-config lines below carry the same information
+    interactive = sys.stdout.isatty()
+
     def _progress(value: float) -> None:
-        if value - last[0] >= 0.02 or value >= 1.0:
+        if interactive and (value - last[0] >= 0.02 or value >= 1.0):
             last[0] = value
             print(f"  ... {value:5.0%}", end="\r", flush=True)
 
+    def _message(text: str) -> None:
+        clear = " " * 20 + "\r" if interactive else ""
+        print(f"{clear}{datetime.now():%H:%M:%S}  {text}", flush=True)
+
     try:
-        report = await run_tuning(settings, spec, progress=_progress)
+        report = await run_tuning(settings, spec, progress=_progress, on_message=_message)
     except ServiceError as exc:
         raise UsageError(str(exc)) from exc
 
-    print(" " * 20, end="\r")
+    if interactive:
+        print(" " * 20, end="\r")
     print(render(report))
     if args.out:
         path = save_report(report, Path(args.out))
@@ -1016,9 +1028,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     data_sub.add_parser("coverage", help="what the lake currently holds")
 
-    symbols_p = data_sub.add_parser(
-        "symbols", help="fetch Saxo symbols for every uic in the lake"
-    )
+    symbols_p = data_sub.add_parser("symbols", help="fetch Saxo symbols for every uic in the lake")
     symbols_p.add_argument(
         "--refresh",
         action="store_true",
@@ -1106,7 +1116,10 @@ def _build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--exchange")
     train_p.add_argument("--name", default="lstm", help="registry name prefix")
     train_p.add_argument(
-        "--model-type", choices=("lstm", "gbm"), default="lstm", help="model family (default lstm)"
+        "--model-type",
+        choices=("lstm", "gbm", "xgb"),
+        default="lstm",
+        help="model family (default lstm); xgb = XGBoost trees, on CUDA when available",
     )
     train_p.add_argument("--horizon", default="5m")
     train_p.add_argument("--context", help="comma-separated context horizons, e.g. 15m,1h")
@@ -1132,10 +1145,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sample-weights", action="store_true", help="weight by return / uniqueness"
     )
     train_p.add_argument("--seed", type=int, default=0)
-
-    tune_p = sub.add_parser(
-        "tune", help="walk-forward grid sweep over a strategy's knobs"
+    train_p.add_argument(
+        "--device", default="auto", help="LSTM / xgb device: auto (CUDA if available), cuda, cpu"
     )
+
+    tune_p = sub.add_parser("tune", help="walk-forward grid sweep over a strategy's knobs")
     tune_p.add_argument("--symbol", action="append", required=True, metavar="SYMBOL")
     tune_p.add_argument("--uic", action="append", type=int, default=[])
     tune_p.add_argument("--asset-type")
@@ -1144,11 +1158,11 @@ def _build_parser() -> argparse.ArgumentParser:
     tune_p.add_argument(
         "--strategy",
         default="lstm",
-        help="registered strategy to sweep: lstm, gbm (model), or ma_cross / orb (classical)",
+        help="registered strategy to sweep: lstm, gbm, xgb (model), or ma_cross / orb (classical)",
     )
     tune_p.add_argument(
         "--model-type",
-        choices=("lstm", "gbm"),
+        choices=("lstm", "gbm", "xgb"),
         default="lstm",
         help="model family for a model sweep",
     )
@@ -1179,6 +1193,9 @@ def _build_parser() -> argparse.ArgumentParser:
     tune_p.add_argument("--lr", type=float, default=1e-3, help="LSTM Adam lr / GBM learning rate")
     tune_p.add_argument("--sample-weights", action="store_true")
     tune_p.add_argument("--seed", type=int, default=0)
+    tune_p.add_argument(
+        "--device", default="auto", help="LSTM / xgb device: auto (CUDA if available), cuda, cpu"
+    )
     tune_p.add_argument("--folds", type=int, default=5)
     tune_p.add_argument("--cv-mode", choices=("rolling", "anchored"), default="rolling")
     tune_p.add_argument("--train-days", type=float, default=365.0)

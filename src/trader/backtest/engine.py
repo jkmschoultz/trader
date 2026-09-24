@@ -400,13 +400,29 @@ class _Engine:
         pos = self.pos[label]
         if pos.units == 0 or row < 1:
             return
+        bar_open = self.col[label]["open"][row - 1]
         bar_high = self.col[label]["high"][row - 1]
         bar_low = self.col[label]["low"][row - 1]
         long = pos.units > 0
 
         level: float | None = None
         reason = ""
-        if long and pos.stop_price and bar_low <= pos.stop_price:
+        # A bar that *opens* beyond a barrier (an overnight or weekend gap) fills
+        # at that open, not at the barrier: the market never traded at the
+        # barrier price. The open comes first in time, so it also decides which
+        # barrier was hit first -- a gap through the take is a take, even if the
+        # rest of the bar later falls through the stop.
+        gapped_stop = pos.stop_price and (
+            bar_open <= pos.stop_price if long else bar_open >= pos.stop_price
+        )
+        gapped_take = pos.take_price and (
+            bar_open >= pos.take_price if long else bar_open <= pos.take_price
+        )
+        if gapped_stop:
+            level, reason = bar_open, "stop"
+        elif gapped_take:
+            level, reason = bar_open, "take"
+        elif long and pos.stop_price and bar_low <= pos.stop_price:
             level, reason = pos.stop_price, "stop"
         elif long and pos.take_price and bar_high >= pos.take_price:
             level, reason = pos.take_price, "take"

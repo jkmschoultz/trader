@@ -12,7 +12,9 @@ open -- what happens first?* One of three things, the same three barriers a
 The engine's tie rule is reproduced: when a single bar's range spans both the
 stop and the take, the **stop** is taken (real fills are path-dependent and
 unknowable from OHLC; assuming the adverse touch came first biases labels the
-safe way). ``touch_price`` is the barrier level, not a guaranteed fill.
+safe way). A bar that *opens* beyond a barrier -- an overnight gap -- exits at
+that open instead of the barrier level, and the open decides which barrier it
+was, again matching the engine. ``touch_price`` is that fill price.
 
 The result frame is indexed by the **decision bar** (the bar the model sees),
 one row per input bar, so it aligns 1:1 with a feature frame on ``time``. The
@@ -164,19 +166,32 @@ def triple_barrier(
     sentinel = n + max_bars + 10
     first_k = np.full(n, sentinel)
     kind = np.zeros(n, dtype=int)  # +1 take, -1 stop
+    fill = np.full(n, np.nan)  # the price the barrier exit actually fills at
 
     for k in range(1, max_bars + 1):
         bar = idx + k
         valid = bar < n
         safe = np.where(valid, bar, 0)
+        bar_op = np.where(valid, op[safe], np.nan)
         bar_hi = np.where(valid, hi[safe], np.nan)
         bar_lo = np.where(valid, lo[safe], np.nan)
-        hit_stop = valid & finite_entry & (bar_lo <= dn)
-        hit_take = valid & finite_entry & (bar_hi >= up)
+        live = valid & finite_entry
+        # a bar that opens beyond a barrier (an overnight gap) exits at that
+        # open, and the open -- first in time -- decides which barrier it was
+        gap_stop = live & (bar_op <= dn)
+        gap_take = live & ~gap_stop & (bar_op >= up)
+        hit_stop = live & (bar_lo <= dn)
+        hit_take = live & (bar_hi >= up)
         newly = (first_k == sentinel) & (hit_stop | hit_take)
-        this_kind = np.where(hit_stop, -1, np.where(hit_take, 1, 0))  # stop wins ties
+        this_kind = np.where(
+            gap_stop,
+            -1,
+            np.where(gap_take, 1, np.where(hit_stop, -1, np.where(hit_take, 1, 0))),
+        )  # without a gap, the stop wins ties
+        this_fill = np.where(gap_stop | gap_take, bar_op, np.where(this_kind > 0, up, dn))
         first_k = np.where(newly, k, first_k)
         kind = np.where(newly, this_kind, kind)
+        fill = np.where(newly, this_fill, fill)
 
     touched = first_k <= max_bars
     timeout_exit = idx + entry_offset + max_bars
@@ -195,7 +210,7 @@ def triple_barrier(
         label[touched] = signed.astype(float)
         barrier[touched] = np.where(signed > 0, "take", "stop")
         touch_pos[touched] = idx[touched] + tk
-        touch_price[touched] = np.where(signed > 0, up[touched], dn[touched])
+        touch_price[touched] = fill[touched]
         bars_held[touched] = tk
         ret[touched] = touch_price[touched] / entry_price[touched] - 1.0
 

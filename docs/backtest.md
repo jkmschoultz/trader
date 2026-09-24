@@ -30,8 +30,13 @@ A `Target(weight, stop, take, max_bars)` attaches a bracket, with `stop` and
 three barriers of Phase 4's triple-barrier labelling (`docs/labels.md`), so the
 parameterisation is shared on purpose.
 
-Brackets are checked intrabar against each completed bar's `high`/`low`:
+Brackets are checked intrabar against each completed bar's `open`/`high`/`low`:
 
+- **gaps fill at the open.** If a bar *opens* beyond a barrier -- an overnight
+  gap, common on an ETF whose underlying trades while it is closed -- the exit
+  fills at that open, not at the barrier price the market never traded at. A
+  long with a stop at 99 that opens at 97 loses 3%, not 1%. The open also
+  decides which barrier came first: opening beyond the take is a take.
 - **stop before take.** If a single bar's range covers both levels, the engine
   takes the stop. Real fills are path-dependent and unknowable from OHLC; the
   conservative assumption is that the adverse level came first. This biases
@@ -39,7 +44,7 @@ Brackets are checked intrabar against each completed bar's `high`/`low`:
 - **`max_bars`** counts completed bars since entry and exits at the next bar's
   open when it reaches zero.
 - Every bracket exit fills through the cost model, like any other fill — the
-  barrier price is the reference, not the guaranteed fill.
+  barrier price (or the gap open) is the reference, not the guaranteed fill.
 
 ## Fills, sizing, and allocation
 

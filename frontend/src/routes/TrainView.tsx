@@ -95,7 +95,7 @@ function ModelDetail({ id }: { id: string }) {
         <span>symbols: {data.symbols.join(", ") || "–"}</span>
         <span>train→{String(data.split.train_end ?? "?").slice(0, 10)}</span>
         <span>val→{String(data.split.val_end ?? "?").slice(0, 10)}</span>
-        {data.model_type === "gbm" ? (
+        {data.model_type === "gbm" || data.model_type === "xgb" ? (
           <span>
             trees: {String(data.hyperparameters.n_estimators ?? "–")} · leaves:{" "}
             {String(data.hyperparameters.num_leaves ?? "–")}
@@ -216,7 +216,8 @@ export function TrainView() {
   const [seed, setSeed] = useState("0");
   const [sampleWeights, setSampleWeights] = useState(false);
 
-  const isGbm = modelType === "gbm";
+  // xgb trains the same trees as gbm (on CUDA), so it takes the same knobs
+  const isGbm = modelType === "gbm" || modelType === "xgb";
 
   const running = jobId != null && (!job || job.status === "queued" || job.status === "running");
   const result = job?.status === "done" ? (job.result as TrainingResult) : null;
@@ -325,6 +326,7 @@ export function TrainView() {
             >
               <option value="lstm">lstm (torch sequence)</option>
               <option value="gbm">gbm (LightGBM)</option>
+              <option value="xgb">xgb (XGBoost, GPU)</option>
             </select>
           </div>
 

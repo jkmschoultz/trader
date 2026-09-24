@@ -38,7 +38,7 @@ __all__ = [
 ]
 
 # strategies that go through the model training path rather than this one
-MODEL_STRATEGIES = frozenset({"lstm", "gbm"})
+MODEL_STRATEGIES = frozenset({"lstm", "gbm", "xgb"})
 
 
 def finite(value: object) -> bool:
