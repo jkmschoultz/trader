@@ -45,3 +45,12 @@ def require_lightgbm():
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise ValueError(f"this needs the optional model dependencies ({exc}); {_HINT}") from exc
     return lightgbm
+
+
+def require_xgboost():
+    """Import and return :mod:`xgboost`, or raise with an install hint."""
+    try:
+        import xgboost
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise ValueError(f"this needs the optional model dependencies ({exc}); {_HINT}") from exc
+    return xgboost

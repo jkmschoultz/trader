@@ -171,6 +171,41 @@ def test_decisions_are_causal_in_a_backtest(saved_model):
     pd.testing.assert_frame_equal(ref_fills, per_fills)
 
 
+def test_precomputed_features_match_per_bar_recompute(saved_model, monkeypatch):
+    """A full-series feature frame served by lookup trades exactly like recomputing each bar."""
+    from trader import backtest as bt
+    from trader.features import pipeline
+    from trader.features.base import FeatureSpec
+
+    root, model_id = saved_model
+    bars = _bars(900, seed=6)
+    # the lake stores microsecond times; the lookup must not depend on resolution
+    bars["time"] = bars["time"].dt.as_unit("us")
+    fspec = FeatureSpec.from_file(f"{root}/{model_id}/feature_spec.json")
+    features, _ = pipeline.compute_feature_frame(bars, spec=fspec)
+
+    def run(precomputed):
+        strat = get_strategy("gbm")(model=model_id, models_dir=root, threshold=0.05)
+        if precomputed is not None:
+            strat.use_precomputed(precomputed)
+        return bt.run({"X": bars}, strat, horizon=5, allocator=bt.get_allocator("equal-weight"))
+
+    ref = run(None)
+    # a label with no precomputed frame falls back to the recompute path
+    other = run({"Y": features})
+
+    def no_pipeline(*args, **kwargs):
+        raise AssertionError("lookup path recomputed features")
+
+    # the lookup path must never touch the pipeline
+    monkeypatch.setattr(pipeline, "compute_feature_frame", no_pipeline)
+    fast = run({"X": features})
+
+    assert len(ref.fills) > 0
+    pd.testing.assert_frame_equal(ref.fills, fast.fills)
+    pd.testing.assert_frame_equal(ref.fills, other.fills)
+
+
 def test_requires_lightgbm(monkeypatch, saved_model):
     import builtins
 

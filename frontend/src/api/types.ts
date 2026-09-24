@@ -186,7 +186,7 @@ export interface FeatureSetInfo {
   context_capable: boolean;
 }
 
-export type ModelType = "lstm" | "gbm";
+export type ModelType = "lstm" | "gbm" | "xgb";
 
 export interface TrainingSpec {
   symbols: string[];
@@ -214,7 +214,7 @@ export interface TrainingSpec {
   bidirectional?: boolean;
   epochs?: number;
   batch_size?: number;
-  // GBM (LightGBM)
+  // GBM (LightGBM) and XGB (XGBoost) -- the same tree hyperparameters
   num_leaves?: number;
   n_estimators?: number;
   max_depth?: number;
@@ -316,7 +316,7 @@ export type GridValue = number | string | boolean;
 export interface TuningSpec {
   base: TuningBase;
   cv: CVConfigSpec;
-  /** "lstm" | "gbm" for a model sweep; any other registered strategy for a classical one. */
+  /** "lstm" | "gbm" | "xgb" for a model sweep; any other registered strategy for a classical one. */
   strategy?: string;
   /** fixed constructor args for a classical-strategy sweep. */
   params?: Record<string, unknown>;

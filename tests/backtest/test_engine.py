@@ -255,3 +255,48 @@ def test_warmup_delays_the_first_decision():
     frame = make_frame(opens=list(range(10, 30)))
     result = run({"X": frame}, {"X": Script([Target(1.0)], warmup=5)}, horizon=5)
     assert result.fills.iloc[0]["time"] == frame["time"].iloc[5]
+
+
+def test_a_gap_through_the_stop_fills_at_the_open_not_the_stop():
+    # entry at bar 1 open = 20, stop 5% -> 19; bar 2 opens at 17 (an overnight gap)
+    frame = make_frame(
+        opens=[20, 20, 17, 17],
+        closes=[20, 20, 17, 17],
+        highs=[20, 20, 17.5, 17],
+        lows=[20, 20, 16.5, 17],
+    )
+    result = run({"X": frame}, {"X": Script([Target(1.0, stop=0.05)])}, horizon=5)
+
+    trade = result.trades.iloc[0]
+    assert trade["exit_reason"] == "stop"
+    assert trade["exit_price"] == 17.0  # the market never traded at 19
+
+
+def test_a_gap_through_the_take_fills_at_the_better_open():
+    # take 10% -> 22; bar 2 opens at 23, then falls through the stop intrabar
+    frame = make_frame(
+        opens=[20, 20, 23, 20],
+        closes=[20, 20, 18, 20],
+        highs=[20, 20, 23, 20],
+        lows=[20, 20, 18, 20],
+    )
+    result = run({"X": frame}, {"X": Script([Target(1.0, stop=0.05, take=0.10)])}, horizon=5)
+
+    trade = result.trades.iloc[0]
+    assert trade["exit_reason"] == "take"  # the open came first
+    assert trade["exit_price"] == 23.0
+
+
+def test_a_short_gapping_up_through_its_stop_fills_at_the_open():
+    # short at 20, stop 5% -> 21; bar 2 opens at 22
+    frame = make_frame(
+        opens=[20, 20, 22, 22],
+        closes=[20, 20, 22, 22],
+        highs=[20, 20, 22.5, 22],
+        lows=[20, 20, 21.5, 22],
+    )
+    result = run({"X": frame}, {"X": Script([Target(-1.0, stop=0.05)])}, horizon=5)
+
+    trade = result.trades.iloc[0]
+    assert trade["exit_reason"] == "stop"
+    assert trade["exit_price"] == 22.0

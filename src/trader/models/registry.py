@@ -14,14 +14,15 @@ the feature spec, barriers, window, and hyperparameters, so two genuinely
 different models never share an id and a re-run of the same recipe is obvious.
 
 A model directory is not LSTM-specific: ``manifest["model_type"]`` is ``"lstm"``
-(torch ``state_dict`` in ``weights.pt``) or ``"gbm"`` (a LightGBM text model in
-``model.txt``), and ``manifest["layout"]`` records whether the features were
-framed as a ``"sequence"`` or flattened to ``"tabular"``. ``load_model``
-dispatches on ``model_type``; ``load_torch`` / ``load_gbm`` are the concrete
-loaders.
+(torch ``state_dict`` in ``weights.pt``), ``"gbm"`` (a LightGBM text model in
+``model.txt``) or ``"xgb"`` (an XGBoost JSON model in ``model.json``), and
+``manifest["layout"]`` records whether the features were framed as a
+``"sequence"`` or flattened to ``"tabular"``. ``load_model``
+dispatches on ``model_type``; ``load_torch`` / ``load_gbm`` / ``load_xgb`` are
+the concrete loaders.
 
 Reading (``list`` / ``get``) needs only the ``[data]`` extra -- it parses JSON.
-``save`` and the loaders need ``[model]``; they import torch / lightgbm lazily.
+``save`` and the loaders need ``[model]``; they import torch / lightgbm / xgboost lazily.
 """
 
 from __future__ import annotations
@@ -50,11 +51,12 @@ __all__ = ["ModelInfo", "ModelNotFound", "ModelRegistry"]
 _MANIFEST = "manifest.json"
 _WEIGHTS = "weights.pt"  # torch state_dict (model_type="lstm")
 _WEIGHTS_GBM = "model.txt"  # LightGBM native text model (model_type="gbm")
+_WEIGHTS_XGB = "model.json"  # XGBoost native JSON model (model_type="xgb")
 _SCALER = "scaler.json"
 _FEATURE_SPEC = "feature_spec.json"
 _REPORT = "report.json"
 
-_WEIGHTS_FOR = {"lstm": _WEIGHTS, "gbm": _WEIGHTS_GBM}
+_WEIGHTS_FOR = {"lstm": _WEIGHTS, "gbm": _WEIGHTS_GBM, "xgb": _WEIGHTS_XGB}
 
 
 class ModelNotFound(ServiceError):
@@ -215,6 +217,10 @@ class ModelRegistry:
             import torch
 
             framework["torch"] = torch.__version__
+        elif model_type == "xgb":
+            from trader.models._optional import require_xgboost
+
+            framework["xgboost"] = require_xgboost().__version__
         else:
             from trader.models._optional import require_lightgbm
 
@@ -269,11 +275,14 @@ class ModelRegistry:
         """Load a model by id, dispatching on ``manifest["model_type"]``.
 
         Returns ``(predictor, scaler, info)`` where ``predictor`` is an eval-mode
-        torch module (``lstm``) or a LightGBM ``Booster`` (``gbm``).
+        torch module (``lstm``), a LightGBM ``Booster`` (``gbm``) or an XGBoost
+        ``Booster`` (``xgb``).
         """
         model_type = self._manifest(model_id).get("model_type", "lstm")
         if model_type == "gbm":
             return self.load_gbm(model_id)
+        if model_type == "xgb":
+            return self.load_xgb(model_id)
         return self.load_torch(model_id)
 
     def load_torch(self, model_id: str) -> tuple[LSTMClassifier, StandardScaler, ModelInfo]:
@@ -320,6 +329,31 @@ class ModelRegistry:
         scaler = StandardScaler.from_dict(json.loads((directory / _SCALER).read_text("utf-8")))
         return booster, scaler, info
 
+    def load_xgb(self, model_id: str) -> tuple[Any, StandardScaler, ModelInfo]:
+        """Load one XGBoost model's ``Booster`` (predicting on CPU), scaler, and info.
+
+        A model trained on CUDA remembers its device; inference is one row at a
+        time, where a GPU round trip costs more than it saves, and the trading
+        box may have no GPU at all -- so prediction is pinned to the CPU.
+
+        Raises:
+            ModelNotFound: nothing registered under ``model_id``.
+        """
+        from trader.models._optional import require_xgboost
+        from trader.models.scaler import StandardScaler
+
+        xgb = require_xgboost()
+        manifest = self._manifest(model_id)
+        info = ModelInfo.from_manifest(manifest)
+        directory = self.path(model_id)
+        weights = manifest.get("files", {}).get("weights", _WEIGHTS_XGB)
+
+        booster = xgb.Booster()
+        booster.load_model(str(directory / weights))
+        booster.set_param({"device": "cpu", "nthread": 1})
+        scaler = StandardScaler.from_dict(json.loads((directory / _SCALER).read_text("utf-8")))
+        return booster, scaler, info
+
 
 def _write_weights(model: Any, model_type: str, path: Path) -> None:
     """Serialise ``model``'s weights to ``path`` in the format for ``model_type``."""
@@ -327,6 +361,11 @@ def _write_weights(model: Any, model_type: str, path: Path) -> None:
         import torch
 
         torch.save(model.state_dict(), path)
+        return
+    if model_type == "xgb":
+        # XGBoost sklearn estimator -> its Booster's portable JSON format
+        booster = model.get_booster() if hasattr(model, "get_booster") else model
+        booster.save_model(str(path))
         return
     # LightGBM sklearn estimator -> its underlying Booster's portable text format.
     booster = getattr(model, "booster_", model)

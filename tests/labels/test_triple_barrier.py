@@ -127,3 +127,33 @@ def test_labels_are_only_minus_one_zero_or_one(random_walk_frame):
     labels = set(events["label"].dropna().unique())
     assert labels <= {-1.0, 0.0, 1.0}
     assert np.isnan(events["label"].iloc[-1])
+
+
+def test_a_gap_through_the_stop_is_labelled_at_the_open(bar_frame, flat_rows):
+    rows = [
+        (100, 100, 100, 100),
+        (100, 100.1, 99.9, 100.0),  # entry at 100; stop 99
+        (97.0, 97.5, 96.5, 97.0),  # opens at 97: an overnight gap through the stop
+    ] + flat_rows(97.0, 30)
+    row = triple_barrier(bar_frame(rows), stop=0.01, take=0.01, max_bars=5).iloc[0]
+
+    assert row["label"] == -1.0
+    assert row["barrier"] == "stop"
+    assert row["touch_price"] == pytest.approx(97.0)
+    assert row["ret"] == pytest.approx(-0.03)
+
+
+def test_a_gap_through_the_take_is_a_take_even_if_the_bar_then_breaks_the_stop(
+    bar_frame, flat_rows
+):
+    rows = [
+        (100, 100, 100, 100),
+        (100, 100.1, 99.9, 100.0),  # entry at 100; take 101, stop 99
+        (102.0, 102.0, 98.0, 98.5),  # opens above the take, later falls through the stop
+    ] + flat_rows(98.5, 30)
+    row = triple_barrier(bar_frame(rows), stop=0.01, take=0.01, max_bars=5).iloc[0]
+
+    assert row["label"] == 1.0
+    assert row["barrier"] == "take"
+    assert row["touch_price"] == pytest.approx(102.0)
+    assert row["ret"] == pytest.approx(0.02)

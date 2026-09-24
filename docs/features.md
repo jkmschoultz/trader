@@ -45,7 +45,45 @@ the columns `h{h}_ret_1`, `h{h}_rsi`, `h{h}_vol`, `h{h}_macd_hist`,
 
 The session-relative columns take their timezone and day boundaries from the
 `RegularHours` calendar inferred in `trader.data.calendars`; with no calendar
-they fall back to UTC calendar days.
+they fall back to UTC calendar days. Note that a run driven by `--uic` skips the
+exchange lookup, so it gets no calendar and these columns use UTC.
+
+`structure_v1` (`trader.features.structure`) — `mtf_v1` plus ~58 session and
+price-structure columns, all from OHLC (no volume needed, so FX works):
+
+- sessions: `sess_asia` / `sess_london` / `sess_ny` / `sess_overlap` flags,
+  `london_elapsed`, `ny_elapsed` (from the 09:30 cash open), `fix_hours` (to the
+  London 16:00 fix), `dow_sin` / `dow_cos`
+- Asian range (roll → London open) and New York opening range (09:30–10:00),
+  running while they form and held after: `*_hi_dist`, `*_lo_dist`,
+  `*_range_atr`, and an `asia_ok` / `or_ok` flag
+- levels: prior day high / low / close and range, prior week high / low, the
+  day's running high / low, floor pivots (P, R1, S1), and two round-number grids
+- per swing order `k` (default 3 and 12): distance to and age of the last
+  confirmed swing high / low, `hh` / `hl` (higher high / higher low), and the
+  last leg's direction, size, Fibonacci retracement (`fib_retr`), signed
+  distance to the 0.382 / 0.5 / 0.618 / 0.786 levels, and the nearest of them
+
+Its clocks are fixed market clocks, not the inferred calendar: `America/New_York`
+and `Europe/London`, DST-aware, with the **trading day rolling at 17:00 New
+York** (Sunday evening is Monday). Distances are in **ATR units**, clipped to
+±25, so one model reads EURUSD and BTC on the same scale. A column that cannot
+exist for an instrument (the Asian range of an ETF that only trades US hours) is
+0 with its `*_ok` flag at 0 — never NaN, which would drop every training row.
+Levels that only need more history (prior week, a first swing) are NaN until
+it exists, like warmup.
+
+**Swing points are the lookahead trap.** A high at bar `j` is a swing high only
+once `k` later bars have failed to beat it, so it is recorded at bar `j + k`.
+The causality test covers the whole set, and a deliberately forward-looking
+swing window makes it fail.
+
+The spec carries `swing_orders` and `level_days` (15). `level_days` is a
+wall-clock span, not a bar count, because a day is 96 bars of 15m FX but 26 of
+an ETF. So it is not folded into `warmup`: `ModelStrategy` extends its recompute
+tail to cover it, which keeps live prior-week levels identical to training. Both
+fields are omitted from `to_dict` at their defaults, so older specs keep their
+digests.
 
 ## Multi-timeframe: the as-of join
 

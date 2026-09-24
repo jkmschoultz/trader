@@ -29,10 +29,11 @@ class TrainingSpec(BaseModel):
     asset_type: str | None = None
     exchange: str | None = None
     name: str = "lstm"
-    #: which model family to train: ``"lstm"`` (torch sequence) or ``"gbm"``
-    #: (LightGBM on the flattened lag stack). Picks the trainer, the feature
+    #: which model family to train: ``"lstm"`` (torch sequence), ``"gbm"``
+    #: (LightGBM on the flattened lag stack) or ``"xgb"`` (XGBoost on the same
+    #: lag stack, on CUDA when available). Picks the trainer, the feature
     #: layout, and the registry weights format.
-    model_type: Literal["lstm", "gbm"] = "lstm"
+    model_type: Literal["lstm", "gbm", "xgb"] = "lstm"
 
     horizon: int = 5
     context_horizons: list[int] = Field(default_factory=list)
@@ -70,10 +71,13 @@ class TrainingSpec(BaseModel):
     class_weight: str | None = "balanced"
     use_sample_weights: bool = False
     seed: int = 0
+    #: device for the LSTM (torch) and the XGBoost trees: ``"auto"`` picks CUDA
+    #: when available, else CPU. The LightGBM ``gbm`` ignores it.
+    device: str = "auto"
 
     @property
     def layout(self) -> str:
-        return "tabular" if self.model_type == "gbm" else "sequence"
+        return "tabular" if self.model_type in ("gbm", "xgb") else "sequence"
 
     @field_validator("horizon", "context_horizons", mode="before")
     @classmethod
@@ -272,6 +276,16 @@ async def run_cv(
         commission_bps=cv.fee_bps, half_spread_bps=cv.spread_bps, slippage_bps=cv.slippage_bps
     )
 
+    # every fold backtests the same series with the same frozen spec: compute each
+    # series' features once and let the strategy look rows up instead of rerunning
+    # the pipeline per bar (which dominated a fold's wall time)
+    from trader.features.pipeline import compute_feature_frame
+
+    precomputed = {
+        s.label: compute_feature_frame(s.frame, spec=merged.feature_spec, session=s.session)[0]
+        for s in series
+    }
+
     folds: list[dict[str, Any]] = []
     for i, split in enumerate(splits):
         tr, va, te = time_split(merged, split, base_horizon=spec.horizon, max_bars=spec.max_bars)
@@ -313,6 +327,7 @@ async def run_cv(
                 on_no_signal=cv.on_no_signal,
                 models_dir=str(tmp),
             )
+            strategy.use_precomputed(precomputed)
             metrics = score_fold(
                 series,
                 strategy,
@@ -362,12 +377,12 @@ async def _build_dataset(settings: Settings, spec: TrainingSpec):
 
     from trader.features.registry import UnknownFeatureSet, get_feature_set
     from trader.labels.triple_barrier import LabelConfig
-    from trader.models._optional import require_lightgbm, require_torch
+    from trader.models._optional import require_lightgbm, require_torch, require_xgboost
     from trader.models.dataset import SequenceBundle, WindowSpec, build_bundle
     from trader.service._panel import load_panel
 
     try:
-        require_lightgbm() if spec.model_type == "gbm" else require_torch()
+        {"gbm": require_lightgbm, "xgb": require_xgboost}.get(spec.model_type, require_torch)()
     except ValueError as exc:
         raise InvalidRequest(str(exc)) from exc
     try:
@@ -426,8 +441,9 @@ def _fit_fold(merged, tr, va, te, spec: TrainingSpec, *, progress=None):
     X, y, w = merged.X, merged.y, merged.w
     scaler = StandardScaler().fit(X[tr])
 
-    if spec.model_type == "gbm":
+    if spec.model_type in ("gbm", "xgb"):
         from trader.models.gbm import GBMConfig, train_gbm
+        from trader.models.xgb import train_xgb
 
         config = GBMConfig(
             num_leaves=spec.num_leaves,
@@ -438,7 +454,10 @@ def _fit_fold(merged, tr, va, te, spec: TrainingSpec, *, progress=None):
             subsample=spec.subsample,
             colsample_bytree=spec.colsample_bytree,
         )
-        model, train_report = train_gbm(
+        # same config, same data: xgb is the CUDA-capable trainer for the same trees
+        extra = {"device": spec.device} if spec.model_type == "xgb" else {}
+        trainer = train_xgb if spec.model_type == "xgb" else train_gbm
+        model, train_report = trainer(
             scaler.transform(X[tr]),
             y[tr],
             w[tr],
@@ -449,6 +468,7 @@ def _fit_fold(merged, tr, va, te, spec: TrainingSpec, *, progress=None):
             use_sample_weights=spec.use_sample_weights,
             seed=spec.seed,
             progress=progress,
+            **extra,
         )
         return model, scaler, config, train_report
 
@@ -477,6 +497,7 @@ def _fit_fold(merged, tr, va, te, spec: TrainingSpec, *, progress=None):
         class_weight=spec.class_weight,
         use_sample_weights=spec.use_sample_weights,
         seed=spec.seed,
+        device=spec.device,
         progress=progress,
     )
     return model, scaler, config, train_report

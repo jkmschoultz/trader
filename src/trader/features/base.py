@@ -49,6 +49,13 @@ class FeatureSpec:
     atr_window: int = 14
     volz_window: int = 20
     regular_hours_only: bool = True
+    #: swing-point orders for structure features: a swing high at bar ``j`` is
+    #: confirmed at ``j + k`` once ``high[j]`` is the max of ``[j - k, j + k]``.
+    swing_orders: tuple[int, ...] = ()
+    #: calendar days of history the level features reach back (prior day /
+    #: prior week). A wall-clock span, not bars -- see ``level_days`` in
+    #: :class:`~trader.strategies.model_base.ModelStrategy`.
+    level_days: int = 0
     columns: tuple[str, ...] = field(default=())
 
     @property
@@ -57,19 +64,33 @@ class FeatureSpec:
 
         A lower bound, not a guarantee: EWM-based columns never fully shed their
         seed. Rows inside the warmup are kept as NaN and dropped only at the
-        dataset boundary.
+        dataset boundary. ``level_days`` is deliberately *not* folded in: bars
+        per day differ between a 24-hour FX market and a 6.5-hour equity
+        session, so it is honoured as a wall-clock span by the consumers
+        instead (level columns stay NaN until their history exists).
         """
         ewm_reach = 3 * max(self.rsi_window, self.macd[1], self.atr_window)
         roll_reach = max(self.volz_window, *self.vol_windows, max(self.returns) + 1)
         warmup = max(ewm_reach, roll_reach)
+        if self.swing_orders:
+            warmup = max(warmup, 2 * max(self.swing_orders) + 1)
         if self.context_horizons and self.base_horizon:
             ratio = max(ceil(h / self.base_horizon) for h in self.context_horizons)
             warmup = max(warmup, ewm_reach * ratio + ratio)
         return int(warmup)
 
     def to_dict(self) -> dict:
-        """A plain JSON-safe dict; tuples become lists."""
+        """A plain JSON-safe dict; tuples become lists.
+
+        ``swing_orders`` / ``level_days`` are omitted at their defaults so a
+        spec that does not use them serialises -- and digests -- exactly as it
+        did before they existed.
+        """
         out = asdict(self)
+        if not out["swing_orders"]:
+            del out["swing_orders"]
+        if not out["level_days"]:
+            del out["level_days"]
         return {k: list(v) if isinstance(v, tuple) else v for k, v in out.items()}
 
     @classmethod
@@ -86,6 +107,8 @@ class FeatureSpec:
             "atr_window": int(data.get("atr_window", 14)),
             "volz_window": int(data.get("volz_window", 20)),
             "regular_hours_only": bool(data.get("regular_hours_only", True)),
+            "swing_orders": tuple(int(k) for k in data.get("swing_orders", ())),
+            "level_days": int(data.get("level_days", 0)),
             "columns": tuple(data.get("columns", ())),
         }
         return cls(**fields)

@@ -194,9 +194,7 @@ async def run_tuning(
         done += 1
         if progress is not None:
             progress(done / n)
-        best = _best_median([r for r in results if r])
-        best_txt = f"best median Sharpe {best:+.2f}" if best is not None else "no config scored yet"
-        _say(f"config {done}/{n} done — {best_txt}")
+        _say(_finish_line(done, n, combos[i], outcome, results, started_at))
 
     _say(f"sweeping {n} configs on {workers} worker{'s' if workers != 1 else ''}")
 
@@ -242,6 +240,45 @@ async def _cv_outcome(
     except InvalidRequest as exc:
         return {"error": str(exc)}
     return {"aggregate": out["aggregate"], "folds": out["folds"]}
+
+
+def _fmt_duration(seconds: float) -> str:
+    minutes, secs = divmod(int(round(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{secs:02d}s"
+
+
+def _finish_line(
+    done: int,
+    n: int,
+    config: dict[str, Any],
+    outcome: dict[str, Any],
+    results: list[dict[str, Any] | None],
+    started_at: datetime,
+) -> str:
+    """One progress line for a finished config: its own score, the best so far, and an ETA.
+
+    The ETA assumes the remaining configs cost what the finished ones did on
+    average -- rough with parallel workers finishing in bursts, but it settles.
+    """
+    agg = outcome.get("aggregate")
+    if agg:
+        median = agg["sharpe"].get("median")
+        mine = f"median Sharpe {median:+.2f}" if isinstance(median, (int, float)) else "no Sharpe"
+    else:
+        mine = f"error: {str(outcome.get('error', '?'))[:80]}"
+    scored = [
+        r["aggregate"]["sharpe"]["median"]
+        for r in results
+        if r and r.get("aggregate") and isinstance(r["aggregate"]["sharpe"]["median"], (int, float))
+    ]
+    best = f"best {max(scored):+.2f}" if scored else "none scored yet"
+    elapsed = (datetime.now(UTC) - started_at).total_seconds()
+    eta = elapsed / done * (n - done)
+    return (
+        f"config {done}/{n} done ({_fmt_config(config) or 'base'}) — {mine} — {best} — "
+        f"elapsed {_fmt_duration(elapsed)}, eta {_fmt_duration(eta)}"
+    )
 
 
 def _run_config_sync(job: tuple[Settings, JobSpec]) -> dict[str, Any]:

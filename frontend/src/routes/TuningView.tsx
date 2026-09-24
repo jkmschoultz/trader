@@ -5,7 +5,14 @@ import { JobProgress } from "../components/JobProgress";
 import { ASSET_TYPES, DEFAULT_ASSET_TYPE } from "../assetTypes";
 import { DEFAULT_EXCHANGE, EXCHANGES } from "../exchanges";
 import { useFeatureSets, useJob, useJobs, useStickyJobId, useStrategies } from "../hooks";
-import type { GridValue, Job, TuningReport, TuningRow, TuningSpec } from "../api/types";
+import type {
+  GridValue,
+  Job,
+  ModelType,
+  TuningReport,
+  TuningRow,
+  TuningSpec,
+} from "../api/types";
 
 const field =
   "rounded border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700";
@@ -14,7 +21,7 @@ const label = "block text-xs font-medium text-slate-500";
 const num = (s: string): number => Number(s);
 const list = (s: string): string[] => s.split(",").map((x) => x.trim()).filter(Boolean);
 
-const MODEL_STRATEGIES = new Set(["lstm", "gbm"]);
+const MODEL_STRATEGIES = new Set(["lstm", "gbm", "xgb"]);
 const SCORING_FIELDS = ["allocator", "leverage", "fee_bps", "spread_bps", "slippage_bps"];
 const LSTM_SWEEPABLE = ["window", "hidden", "layers", "dropout", "lr"];
 const GBM_SWEEPABLE = [
@@ -223,7 +230,8 @@ export function TuningView() {
 
   const [strategy, setStrategy] = useState("lstm");
   const isModel = MODEL_STRATEGIES.has(strategy);
-  const isGbm = strategy === "gbm";
+  // xgb trains the same trees as gbm (on CUDA), so it takes the same knobs
+  const isGbm = strategy === "gbm" || strategy === "xgb";
   const current = useMemo(
     () => strategies.data?.find((s) => s.name === strategy),
     [strategies.data, strategy],
@@ -251,7 +259,7 @@ export function TuningView() {
 
   const sweepable = useMemo(() => {
     if (strategy === "lstm") return [...LSTM_SWEEPABLE, ...MODEL_COMMON_SWEEPABLE];
-    if (strategy === "gbm") return [...GBM_SWEEPABLE, ...MODEL_COMMON_SWEEPABLE];
+    if (isGbm) return [...GBM_SWEEPABLE, ...MODEL_COMMON_SWEEPABLE];
     const ctor = (current?.params ?? []).map((p) => p.name).filter((n) => n !== "models_dir");
     return [...ctor, ...SCORING_FIELDS];
   }, [strategy, current]);
@@ -293,7 +301,7 @@ export function TuningView() {
     }
     const modelBase = isModel
       ? {
-          model_type: strategy as "lstm" | "gbm",
+          model_type: strategy as ModelType,
           context_horizons: list(context),
           feature_set: featureSet,
           stop: num(stop),
@@ -406,7 +414,7 @@ export function TuningView() {
               value={strategy}
               onChange={(e) => setStrategy(e.target.value)}
             >
-              {(strategies.data ?? [{ name: "lstm" }, { name: "gbm" }]).map((s) => (
+              {(strategies.data ?? [{ name: "lstm" }, { name: "gbm" }, { name: "xgb" }]).map((s) => (
                 <option key={s.name} value={s.name}>
                   {s.name}
                   {MODEL_STRATEGIES.has(s.name) ? " (model)" : ""}

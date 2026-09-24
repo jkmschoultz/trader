@@ -20,8 +20,14 @@ Semantics, matched to the engine bar for bar:
   mode the engine supports). `entry="close"` exists for research.
 - For each later bar, `high` is checked against `entry * (1 + take)` and `low`
   against `entry * (1 - stop)`.
-- **Stop wins ties.** If one bar's range spans both levels, the label is the
-  stop (`-1`). Real fills are path-dependent and unknowable from OHLC; assuming
+- **Gaps fill at the open.** If a bar *opens* beyond a barrier (typically an
+  overnight gap on an instrument that closes while its underlying keeps
+  trading, like a bitcoin ETF), the exit fills at that open, not at the barrier
+  price the market never traded at. The open comes first in time, so it also
+  decides which barrier was hit: opening above the take is a take even if the
+  bar later falls through the stop.
+- **Stop wins ties.** If one bar's range spans both levels without a gap, the
+  label is the stop (`-1`). Real fills are path-dependent and unknowable from OHLC; assuming
   the adverse touch came first biases labels the safe way, the same downward
   bias the engine applies.
 - If neither barrier is touched within `max_bars` bars, the **vertical barrier**
@@ -29,8 +35,10 @@ Semantics, matched to the engine bar for bar:
   min_return` collapsing to `0` (a dead-band so a flat drift is not called a
   direction).
 
-`touch_price` is the barrier level, not a guaranteed fill — the same caveat the
-engine's bracket exits carry.
+`touch_price` is the fill price: the barrier level, or the open when the bar
+gapped through it -- the same rule the engine's bracket exits use. Before this
+rule, a stop was booked at its level even after a 3% overnight gap, which made
+both the labels and the backtests quietly too kind to losing trades.
 
 ## Indexing and the trailing NaN band
 

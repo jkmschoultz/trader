@@ -103,3 +103,36 @@ def test_base_split_dates_are_rejected():
             cv=dict(train_days=8, val_days=2, test_days=2),
             grid={"window": [8, 16]},
         )
+
+
+def test_finish_line_reports_the_config_best_and_eta():
+    from datetime import UTC, datetime, timedelta
+
+    from trader.service.tuning import _finish_line
+
+    done = {"aggregate": {"sharpe": {"median": 0.42}}}
+    other = {"config": {"window": 16}, "aggregate": {"sharpe": {"median": 1.5}}}
+    line = _finish_line(
+        2,
+        8,
+        {"window": 4},
+        done,
+        [other, {"config": {"window": 4}, **done}, None],
+        datetime.now(UTC) - timedelta(minutes=10),
+    )
+    assert line.startswith("config 2/8 done (window=4)")
+    assert "median Sharpe +0.42" in line
+    assert "best +1.50" in line
+    assert "elapsed 10m00s" in line and "eta 30m00s" in line
+
+
+def test_finish_line_reports_an_errored_config():
+    from datetime import UTC, datetime
+
+    from trader.service.tuning import _finish_line
+
+    line = _finish_line(
+        1, 3, {"window": 64}, {"error": "fold 1/5: too few samples"}, [None], datetime.now(UTC)
+    )
+    assert "error: fold 1/5: too few samples" in line
+    assert "none scored yet" in line

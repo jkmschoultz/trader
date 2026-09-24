@@ -172,7 +172,7 @@ export function StrategyForm({
                   <label className={label}>
                     {p.name} <span className="text-slate-400">{p.type}</span>
                   </label>
-                  {(strategy === "lstm" || strategy === "gbm") && p.name === "model" ? (
+                  {(strategy === "lstm" || strategy === "gbm" || strategy === "xgb") && p.name === "model" ? (
                     <select
                       className={`${field} w-full`}
                       value={params[p.name] ?? ""}
