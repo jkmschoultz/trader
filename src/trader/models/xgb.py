@@ -65,6 +65,21 @@ def _balanced_weights(y: np.ndarray, n_classes: int) -> np.ndarray:
     return per_class[y]
 
 
+def _class_prior_margin(y: np.ndarray, weight: np.ndarray, n_classes: int) -> str:
+    """The starting margin per class: log of the (weighted) class share, smoothed.
+
+    XGBoost otherwise estimates this intercept itself, and on CUDA (3.4.1) that
+    estimate breaks when a class has no training samples -- every prediction
+    collapses onto one class. Triple-barrier labels often have no "flat" rows
+    when ``min_return`` is 0. The smoothing (one average sample per class) keeps
+    an empty class finite. XGBoost takes a vector as a JSON-list string.
+    """
+    totals = np.bincount(y, weights=weight, minlength=n_classes).astype(float)
+    pad = float(weight.mean()) if len(weight) else 1.0
+    prior = np.log((totals + pad) / (totals.sum() + n_classes * pad))
+    return "[" + ",".join(f"{v:.8f}" for v in prior) + "]"
+
+
 def train_xgb(
     Xtr: np.ndarray,
     ytr: np.ndarray,
@@ -114,6 +129,7 @@ def train_xgb(
     # the native API, not XGBClassifier: the sklearn wrapper insists labels be
     # consecutive, and a fold can lack the (rare) flat class entirely
     params = {
+        "base_score": _class_prior_margin(ytr, weight, config.n_classes),
         "objective": "multi:softprob",
         "num_class": config.n_classes,
         "eval_metric": "mlogloss",

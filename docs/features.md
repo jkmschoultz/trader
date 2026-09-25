@@ -85,6 +85,36 @@ tail to cover it, which keeps live prior-week levels identical to training. Both
 fields are omitted from `to_dict` at their defaults, so older specs keep their
 digests.
 
+`regime_v1` (`trader.features.regime`) — `structure_v1` plus 27 volatility,
+trend and gap columns, again OHLC only:
+
+- volatility regime: `pk_vol_20` / `gk_vol_20` / `rs_vol_20` (Parkinson,
+  Garman-Klass, Rogers-Satchell: whole-candle estimators, more accurate than
+  close-to-close per bar), `gk_ratio` (20-bar vs 100-bar Garman-Klass, above 1 =
+  expanding), and from completed trading days `dvol_20` (20-day close-to-close
+  vol, gaps included), `dvol_ratio` (5-day / 20-day), `dvol_pct` (where
+  `dvol_20` sits in its last 60 days, 0..1), `dvolvol` (how unstable daily
+  ranges are)
+- trend quality: `mom_1` / `mom_5` / `mom_20` (log return vs the close 1 / 5 /
+  20 trading days back, divided by `dvol_20 * sqrt(k)`), `dma20_dist` (vs the
+  20-day average close, in daily-vol units), `er_20` / `er_60` (efficiency
+  ratio: net move / path length, 1 = straight line), `adx` / `di_diff` (Wilder
+  ADX strength and direction, scaled to 0..1), `r2_60` / `slope_60` (fit and
+  size in ATRs of a 60-bar straight line), `ac1_60` (lag-1 return
+  autocorrelation: positive = trending, negative = snapping back),
+  `ema50_dist` / `ema200_dist` / `ema50_slope` (ATR units), `upfrac_20`
+- gaps: `gap_z` (the trading day's open vs the prior close, in daily-vol units),
+  `gap_fill` (0..1 share of the gap retraced so far, 0 when there is no real
+  gap), `gap_trend` (+1 gap with the prior 5-day trend, −1 against, 0 small
+  gap), `day_ret_z` (close vs the day's open)
+
+Daily columns use only **completed** trading days (shifted one day), joined back
+onto every bar of the current day. Built from whole trading days, they read the
+same on 24-hour FX and a 6.5-hour ETF; the bar-count columns (`*_20`, `*_60`)
+do not. The daily columns need ~80 trading days, so `level_days` is 120: a
+series loses its first ~4 months to NaN, and the live recompute tail spans 120
+days. On FX the gap columns stay near 0 (only the Sunday open gaps).
+
 ## Multi-timeframe: the as-of join
 
 Context bars are built by `trader.data.bars.resample` (whole-multiple horizons

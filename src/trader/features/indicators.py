@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 __all__ = [
+    "adx",
     "atr",
     "log_return",
     "macd",
@@ -70,6 +71,34 @@ def atr(frame: pd.DataFrame, window: int = 14) -> pd.Series:
         axis=1,
     ).max(axis=1)
     return true_range.ewm(alpha=1.0 / window, adjust=False, min_periods=window).mean()
+
+
+def adx(frame: pd.DataFrame, window: int = 14) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Wilder's ADX with its directional indicators ``(adx, +DI, -DI)``, all in ``[0, 100]``.
+
+    ADX measures trend *strength* regardless of direction; ``+DI - -DI`` gives
+    the direction.
+    """
+    high, low, close = frame["high"], frame["low"], frame["close"]
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = up.where((up > down) & (up > 0), 0.0).where(up.notna())
+    minus_dm = down.where((down > up) & (down > 0), 0.0).where(down.notna())
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1, skipna=False)
+
+    def smooth(s: pd.Series) -> pd.Series:
+        return s.ewm(alpha=1.0 / window, adjust=False, min_periods=window).mean()
+
+    tr = smooth(true_range)
+    plus_di = 100.0 * smooth(plus_dm) / tr
+    minus_di = 100.0 * smooth(minus_dm) / tr
+    total = plus_di + minus_di
+    dx = (100.0 * (plus_di - minus_di).abs() / total).where(total > 0, 0.0).where(total.notna())
+    return smooth(dx), plus_di, minus_di
 
 
 def range_pct(frame: pd.DataFrame) -> pd.Series:

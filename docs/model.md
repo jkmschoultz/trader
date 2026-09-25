@@ -129,7 +129,10 @@ closely as XGBoost allows: leaf-wise growth capped at `num_leaves`;
 `min_child_samples` becomes `min_child_weight` at ×0.2 (the per-sample hessian of
 a 3-class softmax near uniform); `class_weight="balanced"` becomes per-sample
 weights. It uses the native `xgb.train` API with `num_class=3` because the
-scikit-learn wrapper rejects a fold that lacks the (rare) flat class. The booster
+scikit-learn wrapper rejects a fold that lacks the (rare) flat class. For the
+same reason it sets `base_score` to the smoothed log share of each class: XGBoost
+3.4.1's own intercept estimate breaks on CUDA when a class is empty (val logloss
+~20 from the first tree, every prediction one class), while the CPU is fine. The booster
 is trimmed to its early-stopping best iteration before it is saved, since
 inference predicts with every tree it is given. The registry writes XGBoost's
 JSON model (`model.json`), and `load_xgb` pins prediction to the CPU, so a

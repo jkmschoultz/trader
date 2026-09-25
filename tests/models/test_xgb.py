@@ -85,6 +85,27 @@ def test_trains_when_a_fold_has_no_flat_labels(tabular_fold):
     assert report.class_distribution["train"]["flat"] == 0
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_an_empty_class_does_not_break_the_starting_point(device):
+    """XGBoost 3.4.1's own intercept estimate goes wild on CUDA with an empty
+    class (val logloss ~20 from the first tree); the explicit prior must not."""
+    if device == "cuda" and not cuda_available():
+        pytest.skip("no CUDA")
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(4000, 20)).astype(np.float32)
+    y = rng.choice([0, 2], size=4000, p=[0.64, 0.36])
+    _, report = train_xgb(
+        X[:3000],
+        y[:3000],
+        np.ones(3000),
+        X[3000:],
+        y[3000:],
+        config=GBMConfig(n_estimators=5, num_leaves=7, learning_rate=0.05),
+        device=device,
+    )
+    assert report.epochs[0]["val_multi_logloss"] < 1.2
+
+
 def test_booster_is_trimmed_to_the_best_iteration(tabular_fold):
     booster, report = _fit(tabular_fold, n_estimators=400, learning_rate=0.3)
     assert booster.num_boosted_rounds() == report.best_epoch
