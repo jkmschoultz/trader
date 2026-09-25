@@ -41,8 +41,14 @@ async def test_fetches_each_horizon_and_reports_progress(net_settings):
     chart = respx.get(f"{GATEWAY}/chart/v3/charts").mock(return_value=_one_bar_page())
     respx.get(f"{GATEWAY}/ref/v1/instruments/details/211/Stock").mock(
         return_value=httpx.Response(
-            200, json={"Uic": 211, "Symbol": "AAPL:xnas", "AssetType": "Stock",
-                       "CurrencyCode": "USD", "Description": "Apple Inc."}
+            200,
+            json={
+                "Uic": 211,
+                "Symbol": "AAPL:xnas",
+                "AssetType": "Stock",
+                "CurrencyCode": "USD",
+                "Description": "Apple Inc.",
+            },
         )
     )
     messages: list[str] = []

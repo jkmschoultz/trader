@@ -70,3 +70,35 @@ async def test_run_cv_with_xgb(tmp_path, seed_trainable_lake):
 
     assert len(out["folds"]) == 2
     assert out["aggregate"]["n_folds"] == 2
+
+
+async def test_report_carries_direction_skill_for_val_and_test(tmp_path, seed_trainable_lake):
+    seed_trainable_lake(tmp_path, bars=1600)
+    settings = Settings(data_dir=tmp_path, state_dir=tmp_path / "state")
+    result = await run_training(settings, _spec(train_end="2024-01-06", val_end="2024-01-08"))
+
+    metrics, report = result["metrics"], result["report"]
+    for split in ("val", "test"):
+        assert 0.0 <= metrics[f"{split}_dir_auc"] <= 1.0
+        assert f"{split}_long_top10" in metrics
+        assert len(report["confidence"][split]) == 5
+    # trees now report test accuracy and a test confusion like the LSTM
+    assert "test_macro_f1" in metrics
+    assert report["test_confusion"] is not None
+
+
+@pytest.mark.parametrize(("model_type", "expected"), [("lstm", 1e-3), ("gbm", 0.05), ("xgb", 0.05)])
+def test_unset_lr_uses_the_model_familys_default(model_type, expected):
+    assert _spec(model_type=model_type, lr=None).learning_rate == expected
+    assert _spec(model_type=model_type, lr=0.2).learning_rate == 0.2
+
+
+def test_a_tree_sweep_does_not_inherit_the_lstm_learning_rate():
+    """Tuning rebuilds the spec with model_type = the strategy; an unset lr must follow it."""
+    from trader.service.tuning import TuningSpec
+
+    base = _spec(model_type="lstm", lr=None)
+    cv = CVConfig(folds=2, train_days=8, val_days=2, test_days=1.5)
+    spec = TuningSpec(strategy="xgb", base=base, cv=cv, grid={"num_leaves": [7, 15]})
+    train, _ = spec.specs_for({"num_leaves": 7})
+    assert train.learning_rate == 0.05

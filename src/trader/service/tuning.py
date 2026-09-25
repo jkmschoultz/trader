@@ -45,6 +45,24 @@ _SCORING_FIELDS = {"allocator", "leverage", "fee_bps", "spread_bps", "slippage_b
 JobSpec = tuple[TrainingSpec, CVConfig] | StrategyCVSpec
 
 
+#: RAM one sweep worker may need, for the auto worker count. Each worker builds
+#: its own dataset: an hourly EURUSD LSTM on regime_v1 (100k windows x 32 x 107
+#: features) peaks at ~8.4 GB, and four of those exhausted a 32 GB desktop.
+WORKER_RAM_GB = 10.0
+
+
+def _available_ram_gb() -> float | None:
+    """``MemAvailable`` from /proc/meminfo in GB; None where it cannot be read."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024**2
+    except OSError:
+        pass
+    return None
+
+
 class TuningSpec(BaseModel):
     """A fixed base config, a walk-forward setup, and the grid to sweep.
 
@@ -61,13 +79,16 @@ class TuningSpec(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     grid: dict[str, list[Any]] = Field(min_length=1)
     top_k: int = Field(default=5, ge=1)
-    #: parallel workers for the sweep. 0 = auto (min(4, configs, cpu//2)); 1 = in-process.
+    #: parallel workers for the sweep. 0 = auto (min(4, configs, cpu//2, free RAM /
+    #: WORKER_RAM_GB)); 1 = in-process.
     max_workers: int = Field(default=0, ge=0)
 
     def resolved_workers(self, n_configs: int) -> int:
         if self.max_workers:
             return max(1, min(self.max_workers, n_configs))
-        return max(1, min(4, n_configs, (os.cpu_count() or 2) // 2))
+        free = _available_ram_gb()
+        by_ram = int(free // WORKER_RAM_GB) if free is not None else 4
+        return max(1, min(4, n_configs, (os.cpu_count() or 2) // 2, by_ram))
 
     @property
     def is_model_sweep(self) -> bool:

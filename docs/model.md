@@ -140,6 +140,32 @@ GPU-trained model trades on a box without a GPU. LightGBM's own GPU build was
 only ~1.45× faster and does not share one card well across sweep workers, so
 `gbm` stays CPU-only.
 
+## Direction skill: does the model know when it knows?
+
+Accuracy and macro-F1 weigh every bar equally, but a `ModelStrategy` only acts
+where its *edge*, `p(up) - p(down)`, clears a threshold. So every training run
+(`_add_skill` in `trader.service.training`, metrics in `trader.models.confidence`)
+also reports, for val and, when there is one, test:
+
+- `*_dir_auc` — how well the edge ranks up-labelled bars above down-labelled
+  ones. 0.5 is no skill. It is rank-based, so the balanced class weights, which
+  shift every probability, do not distort it.
+- `*_long_top10` / `*_short_top10` — the up (down) share among the 10% of bars
+  with the highest (lowest) edge, next to `*_up_rate` / `*_down_rate` for all bars.
+- `*_signal_share` / `*_signal_hit` — how many bars clear |edge| > 0.15 and how
+  often those point the right way.
+- `report.confidence[split]` — up / down share per edge quintile. Real skill
+  shows as a share that climbs bin by bin.
+
+Read the **test** numbers. Val drives early stopping (and the LSTM's best
+epoch), so it is optimistic. Tree models now also report test accuracy, F1 and a
+confusion matrix, which only the LSTM had before.
+
+`lr` defaults per model family (`DEFAULT_LR`): 1e-3 for the LSTM's Adam, 0.05
+for LightGBM / XGBoost. It used to be 1e-3 for all three, which left 400 trees
+barely past the class prior. Sweeps and models from before that change were
+trained at that rate unless `--lr` was given.
+
 ## The registry
 
 `ModelRegistry` (`Settings.models_dir`, default `data_dir/models/`) stores one

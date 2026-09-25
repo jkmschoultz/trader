@@ -12,17 +12,24 @@ import pytest
 from trader.labels.triple_barrier import triple_barrier
 
 
-@pytest.mark.parametrize("max_bars", [8, 20])
-def test_future_beyond_the_window_does_not_change_a_label(random_walk_frame, max_bars):
+@pytest.mark.parametrize(
+    ("max_bars", "barriers"),
+    [
+        (8, dict(stop=0.01, take=0.01)),
+        (20, dict(stop=0.01, take=0.01)),
+        (20, dict(stop=2.0, take=2.0, scale="atr")),  # ATR from the decision bar back
+    ],
+)
+def test_future_beyond_the_window_does_not_change_a_label(random_walk_frame, max_bars, barriers):
     frame = random_walk_frame(500, seed=3)
-    reference = triple_barrier(frame, stop=0.01, take=0.01, max_bars=max_bars)
+    reference = triple_barrier(frame, max_bars=max_bars, **barriers)
 
     cut = 300
     horizon_end = cut + 1 + max_bars  # last bar row `cut` may legitimately read
     tampered = frame.copy()
     beyond = tampered.index > horizon_end
     tampered.loc[beyond, ["open", "high", "low", "close"]] *= 4.0
-    perturbed = triple_barrier(tampered, stop=0.01, take=0.01, max_bars=max_bars)
+    perturbed = triple_barrier(tampered, max_bars=max_bars, **barriers)
 
     a = reference.iloc[: cut + 1]
     b = perturbed.iloc[: cut + 1]

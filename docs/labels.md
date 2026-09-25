@@ -40,6 +40,30 @@ gapped through it -- the same rule the engine's bracket exits use. Before this
 rule, a stop was booked at its level even after a 3% overnight gap, which made
 both the labels and the backtests quietly too kind to losing trades.
 
+## ATR-scaled barriers (`scale="atr"`)
+
+With fixed fractions, a 1% stop is a big move in a calm week and noise in a
+wild one. So the label mostly records the volatility regime, and an uneven
+stop / take (1% / 2%) tilts the classes. `triple_barrier(..., scale="atr")`
+(`--barrier-scale atr` on `labels`, `train` and `tune`) reads `stop` and `take`
+as **multiples of ATR(14)** instead. Each decision bar's barriers are
+`stop * ATR / close` and `take * ATR / close`, with the ATR known at that bar's
+close (`barrier_unit`). Rows inside the ATR warmup get a NaN label.
+
+The model manifest records `"scale": "atr"` in its barriers (omitted for
+fractions, so older model ids are unchanged). `ModelStrategy._bracket` converts
+the multiples with the same `barrier_unit` over the last 700 bars of its
+history, enough for the ATR's EWM seed to vanish, so the bracket traded equals
+the one taught. `tests/strategies/test_atr_bracket.py` pins that.
+
+Use **symmetric** multiples (`stop == take`). A short uses the same bracket
+mirrored, and "down" means the long's stop was hit. Only with equal barriers
+is that the same event as the short's take being hit.
+
+On IBIT 5m with `max_bars=48` (tuning lake), symmetric ATR barriers give
+~50 / 50 up / down, against 56 / 44 for 1% / 2%. 3 ATRs give a mean |ret|
+near the 1% / 2% setup's, with ~13% of trades timing out.
+
 ## Indexing and the trailing NaN band
 
 The result frame is indexed by the **decision bar** (the bar the model sees),

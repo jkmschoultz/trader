@@ -21,6 +21,11 @@ from trader.service.inputs import parse_since
 __all__ = ["CVConfig", "TrainingSpec", "run_cv", "run_training"]
 
 
+#: learning rate per model family when ``lr`` is not given: Adam's usual 1e-3 for
+#: the LSTM; 0.05 for boosted trees, where 1e-3 leaves 400 trees near the prior
+DEFAULT_LR: dict[str, float] = {"lstm": 1e-3, "gbm": 0.05, "xgb": 0.05}
+
+
 class TrainingSpec(BaseModel):
     """Everything needed to train and register one model."""
 
@@ -43,6 +48,9 @@ class TrainingSpec(BaseModel):
     take: float | None = Field(default=0.01, gt=0)
     max_bars: int = Field(default=24, ge=1)
     min_return: float = Field(default=0.0, ge=0)
+    #: ``"fraction"``: stop / take are price fractions (0.01 = 1%). ``"atr"``:
+    #: multiples of the decision bar's ATR, so barriers widen with volatility.
+    barrier_scale: Literal["fraction", "atr"] = "fraction"
 
     window: int = Field(default=32, ge=2)
     # Required for a single train (:func:`run_training`); ignored by
@@ -67,13 +75,20 @@ class TrainingSpec(BaseModel):
     subsample: float = Field(default=0.8, gt=0, le=1)
     colsample_bytree: float = Field(default=0.8, gt=0, le=1)
     # --- shared ---
-    lr: float = Field(default=1e-3, gt=0)  # LSTM Adam lr / GBM learning_rate
+    #: LSTM Adam lr / GBM + XGB learning rate. ``None`` picks the model family's
+    #: default (:data:`DEFAULT_LR`) -- one shared default is wrong for both.
+    lr: float | None = Field(default=None, gt=0)
     class_weight: str | None = "balanced"
     use_sample_weights: bool = False
     seed: int = 0
     #: device for the LSTM (torch) and the XGBoost trees: ``"auto"`` picks CUDA
     #: when available, else CPU. The LightGBM ``gbm`` ignores it.
     device: str = "auto"
+
+    @property
+    def learning_rate(self) -> float:
+        """``lr``, or the model family's default when it was left unset."""
+        return self.lr if self.lr is not None else DEFAULT_LR[self.model_type]
 
     @property
     def layout(self) -> str:
@@ -203,7 +218,7 @@ async def run_training(
             "horizon": spec.horizon,
         },
         optimiser={
-            "lr": spec.lr,
+            "lr": spec.learning_rate,
             "class_weight": spec.class_weight,
             "use_sample_weights": spec.use_sample_weights,
             "seed": spec.seed,
@@ -401,7 +416,11 @@ async def _build_dataset(settings: Settings, spec: TrainingSpec):
     )
 
     label = LabelConfig(
-        stop=spec.stop, take=spec.take, max_bars=spec.max_bars, min_return=spec.min_return
+        stop=spec.stop,
+        take=spec.take,
+        max_bars=spec.max_bars,
+        min_return=spec.min_return,
+        scale=spec.barrier_scale,
     )
     window_spec = WindowSpec(
         window=spec.window,
@@ -448,7 +467,7 @@ def _fit_fold(merged, tr, va, te, spec: TrainingSpec, *, progress=None):
         config = GBMConfig(
             num_leaves=spec.num_leaves,
             max_depth=spec.max_depth,
-            learning_rate=spec.lr,
+            learning_rate=spec.learning_rate,
             n_estimators=spec.n_estimators,
             min_child_samples=spec.min_child_samples,
             subsample=spec.subsample,
@@ -470,6 +489,7 @@ def _fit_fold(merged, tr, va, te, spec: TrainingSpec, *, progress=None):
             progress=progress,
             **extra,
         )
+        _add_skill(model, spec.model_type, train_report, scaler, X, y, va, te)
         return model, scaler, config, train_report
 
     from trader.models.lstm import LSTMConfig
@@ -493,14 +513,72 @@ def _fit_fold(merged, tr, va, te, spec: TrainingSpec, *, progress=None):
         Xte=scaler.transform(X[te]) if te.any() else None,
         yte=y[te] if te.any() else None,
         batch_size=spec.batch_size,
-        lr=spec.lr,
+        lr=spec.learning_rate,
         class_weight=spec.class_weight,
         use_sample_weights=spec.use_sample_weights,
         seed=spec.seed,
         device=spec.device,
         progress=progress,
     )
+    _add_skill(model, spec.model_type, train_report, scaler, X, y, va, te)
     return model, scaler, config, train_report
+
+
+def _predict_proba(model, model_type: str, X):
+    """``(n, 3)`` down / flat / up probabilities from a freshly trained model."""
+    import numpy as np
+
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    if model_type == "xgb":
+        return np.asarray(model.inplace_predict(X), dtype=float).reshape(len(X), -1)
+    if model_type == "gbm":
+        # the sklearn wrapper only has columns for classes seen in training
+        out = np.zeros((len(X), 3))
+        out[:, np.asarray(model.classes_, dtype=int)] = model.predict_proba(X)
+        return out
+
+    import torch
+
+    device = next(model.parameters()).device
+    model.eval()
+    chunks = []
+    with torch.no_grad():
+        for start in range(0, len(X), 4096):
+            logits = model(torch.from_numpy(X[start : start + 4096]).to(device))
+            chunks.append(torch.softmax(logits, dim=1).cpu().numpy())
+    return np.concatenate(chunks) if chunks else np.zeros((0, 3))
+
+
+def _add_skill(model, model_type: str, report, scaler, X, y, va, te) -> None:
+    """Add direction-skill metrics (val, and test when there is one) to ``report``.
+
+    Also gives the tree models the test accuracy / F1 / confusion the LSTM
+    trainer already reports, so every model family prints the same summary.
+    """
+    from sklearn.metrics import confusion_matrix, f1_score
+
+    from trader.models.confidence import direction_metrics, edge_table
+    from trader.models.gbm import _class_distribution
+
+    for name, mask in (("val", va), ("test", te)):
+        if not mask.any():
+            continue
+        proba = _predict_proba(model, model_type, scaler.transform(X[mask]))
+        truth = y[mask]
+        report.metrics.update(
+            {f"{name}_{k}": v for k, v in direction_metrics(proba, truth).items()}
+        )
+        report.confidence[name] = edge_table(proba, truth)
+        if name == "test" and report.test_confusion is None:
+            pred = proba.argmax(axis=1)
+            report.test_confusion = confusion_matrix(truth, pred, labels=[0, 1, 2]).tolist()
+            report.class_distribution["test"] = _class_distribution(truth)
+            report.n_test = int(mask.sum())
+            report.metrics["test_acc"] = round(float((pred == truth).mean()), 5)
+            report.metrics["test_macro_f1"] = round(
+                float(f1_score(truth, pred, average="macro", labels=[0, 1, 2], zero_division=0)),
+                5,
+            )
 
 
 def _sample_weights(frame, label):
@@ -514,5 +592,6 @@ def _sample_weights(frame, label):
         max_bars=label.max_bars,
         min_return=label.min_return,
         entry=label.entry,
+        scale=label.scale,
     )
     return return_attribution_weights(events, frame["time"])

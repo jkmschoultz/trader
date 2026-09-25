@@ -23,6 +23,9 @@ class TrainReport:
     test_confusion: list[list[int]] | None = None
     class_distribution: dict[str, dict[str, int]] = field(default_factory=dict)
     metrics: dict[str, float] = field(default_factory=dict)
+    #: per split ("val" / "test"): up / down share by edge quintile, see
+    #: :func:`trader.models.confidence.edge_table`
+    confidence: dict[str, list[dict[str, float]]] = field(default_factory=dict)
     n_features: int = 0
     n_train: int = 0
     n_val: int = 0
@@ -39,6 +42,7 @@ class TrainReport:
             "test_confusion": self.test_confusion,
             "class_distribution": self.class_distribution,
             "metrics": self.metrics,
+            "confidence": self.confidence,
             "n_features": self.n_features,
             "n_train": self.n_train,
             "n_val": self.n_val,

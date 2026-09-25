@@ -24,7 +24,12 @@ async def test_summarises_the_class_balance(seeded_settings):
     assert set(summary["class_counts"]) == {-1, 0, 1}
     assert sum(summary["class_counts"].values()) == summary["n_events"]
     assert set(summary["barrier_breakdown"]) == {"stop", "take", "time"}
-    assert summary["barriers"] == {"stop": 0.01, "take": 0.01, "max_bars": 6}
+    assert summary["barriers"] == {
+        "stop": 0.01,
+        "take": 0.01,
+        "max_bars": 6,
+        "scale": "fraction",
+    }
     assert "X" in summary["per_symbol"]
     assert summary["per_symbol"]["X"]["key"] == "Stock:211@5m"
 

@@ -157,3 +157,46 @@ def test_a_gap_through_the_take_is_a_take_even_if_the_bar_then_breaks_the_stop(
     assert row["barrier"] == "take"
     assert row["touch_price"] == pytest.approx(102.0)
     assert row["ret"] == pytest.approx(0.02)
+
+
+# --- ATR-scaled barriers ---------------------------------------------------------
+
+
+def test_atr_barriers_match_fraction_barriers_of_the_same_width(random_walk_frame):
+    """An ATR label at bar i is the fraction label with stop / take = k * ATR_i / close_i."""
+    from trader.labels.triple_barrier import barrier_unit
+
+    frame = random_walk_frame(400, seed=11)
+    atr_events = triple_barrier(frame, stop=1.5, take=3.0, max_bars=20, scale="atr")
+    unit = barrier_unit(frame, "atr")
+
+    for i in (40, 120, 250, 360):
+        fixed = triple_barrier(frame, stop=1.5 * unit[i], take=3.0 * unit[i], max_bars=20)
+        for col in ("label", "barrier", "bars_held", "touch_price"):
+            assert atr_events.iloc[i][col] == fixed.iloc[i][col], (i, col)
+
+
+def test_atr_barriers_are_unlabelled_until_the_atr_exists(random_walk_frame):
+    from trader.labels.triple_barrier import ATR_WINDOW
+
+    frame = random_walk_frame(200, seed=2)
+    events = triple_barrier(frame, stop=2.0, take=2.0, max_bars=10, scale="atr")
+    assert events["label"].iloc[: ATR_WINDOW - 1].isna().all()
+    assert events["label"].iloc[ATR_WINDOW:100].notna().all()
+
+
+def test_atr_barriers_widen_with_volatility(random_walk_frame):
+    """The same 2-ATR barrier is a bigger move when bars are bigger."""
+    from trader.labels.triple_barrier import barrier_unit
+
+    calm = random_walk_frame(200, seed=4)
+    wild = calm.copy()
+    mid = wild["close"].mean()
+    for col in ("open", "high", "low", "close"):
+        wild[col] = mid + (wild[col] - mid) * 3.0  # same path, 3x the swings
+    assert np.nanmedian(barrier_unit(wild, "atr")) > 2.5 * np.nanmedian(barrier_unit(calm, "atr"))
+
+
+def test_unknown_barrier_scale_is_rejected(random_walk_frame):
+    with pytest.raises(ValueError, match="scale"):
+        triple_barrier(random_walk_frame(50), stop=1.0, take=1.0, max_bars=5, scale="pips")

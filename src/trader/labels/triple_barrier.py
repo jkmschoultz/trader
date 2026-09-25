@@ -16,6 +16,14 @@ safe way). A bar that *opens* beyond a barrier -- an overnight gap -- exits at
 that open instead of the barrier level, and the open decides which barrier it
 was, again matching the engine. ``touch_price`` is that fill price.
 
+With ``scale="atr"`` the ``stop`` / ``take`` values are **multiples of ATR**
+instead of fixed fractions: each decision bar's barriers are ``stop * ATR / close``
+and ``take * ATR / close``, using the ATR known at that bar's close
+(:func:`barrier_unit`). A 2-ATR stop is then wide in a wild week and tight in a
+quiet one, so a label answers "which way did price go, relative to how much it
+normally moves" rather than mostly "was it a volatile week". ``ModelStrategy``
+converts the same way at decision time, so the bracket traded is the one taught.
+
 The result frame is indexed by the **decision bar** (the bar the model sees),
 one row per input bar, so it aligns 1:1 with a feature frame on ``time``. The
 trailing ``max_bars + 1`` rows have no room for a full forward window and get a
@@ -31,12 +39,36 @@ import numpy as np
 import pandas as pd
 
 __all__ = [
+    "ATR_WINDOW",
     "BarrierParams",
     "LabelConfig",
     "barrier_params_from_target",
+    "barrier_unit",
     "target_from_barrier_params",
     "triple_barrier",
 ]
+
+
+#: ATR lookback for ``scale="atr"`` barriers (the feature sets' default too)
+ATR_WINDOW = 14
+
+BarrierScale = Literal["fraction", "atr"]
+
+
+def barrier_unit(frame: pd.DataFrame, scale: BarrierScale) -> np.ndarray:
+    """What one unit of ``stop`` / ``take`` means at each bar, as a price fraction.
+
+    ``"fraction"``: 1 everywhere (``stop=0.01`` is 1%). ``"atr"``: ``ATR / close``
+    at that bar's close, NaN during the ATR warmup. Backward-looking only, so
+    ``ModelStrategy`` gets the same value from the history it holds.
+    """
+    if scale == "fraction":
+        return np.ones(len(frame))
+    if scale == "atr":
+        from trader.features.indicators import atr
+
+        return (atr(frame, ATR_WINDOW) / frame["close"]).to_numpy(dtype=float)
+    raise ValueError(f"barrier scale must be 'fraction' or 'atr', got {scale!r}")
 
 
 @dataclass(frozen=True)
@@ -46,8 +78,13 @@ class BarrierParams:
     stop: float | None
     take: float | None
     max_bars: int
+    #: ``"fraction"``: stop / take are price fractions. ``"atr"``: multiples of
+    #: ATR at the decision bar -- see :func:`barrier_unit`.
+    scale: BarrierScale = "fraction"
 
     def __post_init__(self) -> None:
+        if self.scale not in ("fraction", "atr"):
+            raise ValueError(f"scale must be 'fraction' or 'atr', got {self.scale!r}")
         if self.max_bars < 1:
             raise ValueError(f"max_bars must be >= 1, got {self.max_bars}")
         for name in ("stop", "take"):
@@ -82,7 +119,11 @@ def barrier_params_from_target(target: object) -> BarrierParams:
 
 
 def target_from_barrier_params(params: BarrierParams | dict) -> dict:
-    """Barrier kwargs for ``Target(weight, **kwargs)``."""
+    """Barrier kwargs for ``Target(weight, **kwargs)``.
+
+    For ``scale="atr"`` these are ATR multiples: the caller multiplies stop and
+    take by :func:`barrier_unit` at the decision bar before building a Target.
+    """
     if isinstance(params, BarrierParams):
         return {"stop": params.stop, "take": params.take, "max_bars": params.max_bars}
     return {
@@ -112,6 +153,7 @@ def triple_barrier(
     max_bars: int,
     min_return: float = 0.0,
     entry: Literal["next_open", "close"] = "next_open",
+    scale: BarrierScale = "fraction",
 ) -> pd.DataFrame:
     """Label every bar of ``frame`` by which barrier its forward window hits first.
 
@@ -123,6 +165,9 @@ def triple_barrier(
         min_return: timeout deadband; ``|ret| <= min_return`` labels ``0``.
         entry: ``"next_open"`` (fill at the next bar's open, matching the engine)
             or ``"close"`` (fill at the decision bar's close).
+        scale: ``"fraction"`` (stop / take are price fractions) or ``"atr"``
+            (multiples of the decision bar's ATR; bars inside the ATR warmup get
+            a NaN label).
 
     Returns:
         A frame indexed by the decision bar's ``time``, one row per input bar,
@@ -131,7 +176,7 @@ def triple_barrier(
         (``"stop"`` | ``"take"`` | ``"time"`` | None), ``bars_held``, ``ret``.
     """
     # Validate through the dataclass.
-    BarrierParams(stop=stop, take=take, max_bars=max_bars)
+    BarrierParams(stop=stop, take=take, max_bars=max_bars, scale=scale)
 
     n = len(frame)
     times = frame["time"].reset_index(drop=True)
@@ -159,9 +204,11 @@ def triple_barrier(
     else:  # pragma: no cover - guarded by the type
         raise ValueError("entry must be 'next_open' or 'close'")
 
-    up = entry_price * (1.0 + take) if take is not None else np.full(n, np.inf)
-    dn = entry_price * (1.0 - stop) if stop is not None else np.full(n, -np.inf)
-    finite_entry = np.isfinite(entry_price)
+    # barriers are set at the decision bar (known at its close), applied to the fill
+    unit = barrier_unit(frame, scale)
+    up = entry_price * (1.0 + take * unit) if take is not None else np.full(n, np.inf)
+    dn = entry_price * (1.0 - stop * unit) if stop is not None else np.full(n, -np.inf)
+    finite_entry = np.isfinite(entry_price) & np.isfinite(unit)
 
     sentinel = n + max_bars + 10
     first_k = np.full(n, sentinel)

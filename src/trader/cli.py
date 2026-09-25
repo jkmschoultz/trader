@@ -624,6 +624,7 @@ async def _cmd_labels(settings: Settings, args) -> int:
             take=args.take,
             max_bars=args.max_bars,
             min_return=args.min_return,
+            barrier_scale=args.barrier_scale,
         )
     except ValidationError as exc:
         raise UsageError(_first_error(exc)) from exc
@@ -637,6 +638,7 @@ async def _cmd_labels(settings: Settings, args) -> int:
     print(
         f"\nbarriers: stop={barriers['stop']} take={barriers['take']} "
         f"max_bars={barriers['max_bars']}  min_return={args.min_return}"
+        + ("  (stop/take in ATRs)" if barriers.get("scale") == "atr" else "")
     )
     print(f"events:   {summary['n_events']:,}")
     counts, pct = summary["class_counts"], summary["class_pct"]
@@ -683,6 +685,7 @@ async def _cmd_train(settings: Settings, args) -> int:
             take=args.take,
             max_bars=args.max_bars,
             min_return=args.min_return,
+            barrier_scale=args.barrier_scale,
             window=args.window,
             train_end=args.train_end,
             val_end=args.val_end,
@@ -734,7 +737,30 @@ async def _cmd_train(settings: Settings, args) -> int:
             print(f"{name} confusion (rows = true down/flat/up):")
             for row in matrix:
                 print("  " + "  ".join(f"{v:>6}" for v in row))
+    for name in ("val", "test"):
+        _print_skill(name, metrics, report.get("confidence", {}).get(name))
     return 0
+
+
+def _print_skill(name: str, metrics: dict, table: list | None) -> None:
+    """Does a bigger edge (p(up) - p(down)) mean better odds? See trader.models.confidence."""
+    if f"{name}_dir_auc" not in metrics:
+        return
+
+    def pct(key: str) -> str:
+        value = metrics.get(f"{name}_{key}")
+        return "  n/a" if value is None or value != value else f"{value:5.1%}"
+
+    print(f"{name} direction skill (edge = p(up) - p(down)):")
+    print(f"  up-vs-down AUC     {metrics[f'{name}_dir_auc']:.3f}   (0.5 = no skill)")
+    print(f"  top 10% edge       {pct('long_top10')} up     (all bars: {pct('up_rate')})")
+    print(f"  bottom 10% edge    {pct('short_top10')} down   (all bars: {pct('down_rate')})")
+    print(f"  |edge| > 0.15      {pct('signal_share')} of bars, {pct('signal_hit')} pointed right")
+    if table:
+        print("  by edge quintile:   edge range          up    down")
+        for row in table:
+            span = f"{row['edge_lo']:+.2f} .. {row['edge_hi']:+.2f}"
+            print(f"                      {span:<16} {row['up']:5.1%}  {row['down']:5.1%}")
 
 
 # --------------------------------------------------------------------------- tune
@@ -789,6 +815,7 @@ async def _cmd_tune(settings: Settings, args) -> int:
                 take=args.take,
                 max_bars=args.max_bars,
                 min_return=args.min_return,
+                barrier_scale=args.barrier_scale,
                 window=args.window,
                 embargo_bars=args.embargo_bars,
                 since=args.since,
@@ -1107,6 +1134,12 @@ def _build_parser() -> argparse.ArgumentParser:
     labels_p.add_argument("--take", type=float, default=0.01, help="take fraction (default 0.01)")
     labels_p.add_argument("--max-bars", type=int, default=24, help="vertical barrier (default 24)")
     labels_p.add_argument("--min-return", type=float, default=0.0, help="timeout deadband")
+    labels_p.add_argument(
+        "--barrier-scale",
+        choices=("fraction", "atr"),
+        default="fraction",
+        help="stop/take units: price fractions (0.01 = 1%%) or multiples of ATR",
+    )
     labels_p.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
 
     train_p = sub.add_parser("train", help="train a model and register it (needs [model])")
@@ -1128,6 +1161,12 @@ def _build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--take", type=float, default=0.01)
     train_p.add_argument("--max-bars", type=int, default=24)
     train_p.add_argument("--min-return", type=float, default=0.0)
+    train_p.add_argument(
+        "--barrier-scale",
+        choices=("fraction", "atr"),
+        default="fraction",
+        help="stop/take units: price fractions (0.01 = 1%%) or multiples of ATR",
+    )
     train_p.add_argument("--window", type=int, default=32, help="sequence length in bars")
     train_p.add_argument("--train-end", required=True, help="train/val boundary date")
     train_p.add_argument("--val-end", required=True, help="val/test boundary date")
@@ -1140,7 +1179,9 @@ def _build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--epochs", type=int, default=40)
     train_p.add_argument("--batch-size", type=int, default=128)
     _add_gbm_args(train_p)
-    train_p.add_argument("--lr", type=float, default=1e-3, help="LSTM Adam lr / GBM learning rate")
+    train_p.add_argument(
+        "--lr", type=float, help="learning rate (default: 1e-3 for lstm, 0.05 for gbm / xgb)"
+    )
     train_p.add_argument(
         "--sample-weights", action="store_true", help="weight by return / uniqueness"
     )
@@ -1180,6 +1221,12 @@ def _build_parser() -> argparse.ArgumentParser:
     tune_p.add_argument("--take", type=float, default=0.01)
     tune_p.add_argument("--max-bars", type=int, default=24)
     tune_p.add_argument("--min-return", type=float, default=0.0)
+    tune_p.add_argument(
+        "--barrier-scale",
+        choices=("fraction", "atr"),
+        default="fraction",
+        help="stop/take units: price fractions (0.01 = 1%%) or multiples of ATR",
+    )
     tune_p.add_argument("--window", type=int, default=32)
     tune_p.add_argument("--embargo-bars", type=int, help="default window + max_bars")
     tune_p.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
@@ -1190,7 +1237,9 @@ def _build_parser() -> argparse.ArgumentParser:
     tune_p.add_argument("--epochs", type=int, default=40)
     tune_p.add_argument("--batch-size", type=int, default=128)
     _add_gbm_args(tune_p)
-    tune_p.add_argument("--lr", type=float, default=1e-3, help="LSTM Adam lr / GBM learning rate")
+    tune_p.add_argument(
+        "--lr", type=float, help="learning rate (default: 1e-3 for lstm, 0.05 for gbm / xgb)"
+    )
     tune_p.add_argument("--sample-weights", action="store_true")
     tune_p.add_argument("--seed", type=int, default=0)
     tune_p.add_argument(

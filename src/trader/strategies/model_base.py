@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 # past ``warmup`` is EWM burn-in headroom -- an EMA still carries a little of its
 # seed for many spans -- scaled per call by the coarsest context ratio.
 _TAIL_PAD = 300
+# bars of history for an ATR-scaled bracket: the ATR's EWM seed decays as
+# (13/14)^n, so 700 bars reproduce the full-history value the labels used
+_ATR_TAIL = 700
 
 
 class ModelStrategy(InstrumentStrategy):
@@ -93,6 +96,8 @@ class ModelStrategy(InstrumentStrategy):
         self._weight = float(weight)
         self._flat_on_no_signal = on_no_signal == "flat"
         self._barrier = target_from_barrier_params(self._info.barriers) if bracket else {}
+        # "atr": the stored stop / take are ATR multiples, converted per decision
+        self._barrier_scale = self._info.barriers.get("scale", "fraction")
         # label -> (bar times as int64 ns, feature rows); see use_precomputed
         self._precomputed: dict[str, tuple] = {}
 
@@ -142,6 +147,29 @@ class ModelStrategy(InstrumentStrategy):
         features, _ = compute_feature_frame(tail, spec=self._spec, session=ctx.session)
         return features.to_numpy(dtype="float32")[-self._window :]
 
+    def _bracket(self, ctx: BarContext) -> dict | None:
+        """This decision's bracket kwargs; None if an ATR bracket has no ATR yet.
+
+        Uses :func:`~trader.labels.triple_barrier.barrier_unit`, the same
+        function the labels were built with, on the bars up to this one.
+        """
+        if not self._barrier or self._barrier_scale == "fraction":
+            return self._barrier
+
+        import math
+
+        from trader.labels.triple_barrier import barrier_unit
+
+        unit = float(barrier_unit(ctx.history.iloc[-_ATR_TAIL:], self._barrier_scale)[-1])
+        if not math.isfinite(unit) or unit <= 0:
+            return None
+        stop, take = self._barrier["stop"], self._barrier["take"]
+        return {
+            **self._barrier,
+            "stop": stop * unit if stop is not None else None,
+            "take": take * unit if take is not None else None,
+        }
+
     # --- subclass hooks -----------------------------------------------------
 
     @abstractmethod
@@ -171,8 +199,9 @@ class ModelStrategy(InstrumentStrategy):
 
         probs = np.asarray(self._predict_proba(np.ascontiguousarray(x)), dtype=float).reshape(-1)
         edge = float(probs[2] - probs[0])  # p(up) - p(down)
-        if edge > self._threshold:
-            return Target(self._weight, **self._barrier)
-        if edge < -self._threshold:
-            return Target(-self._weight, **self._barrier)
+        if abs(edge) > self._threshold:
+            barrier = self._bracket(ctx)
+            if barrier is None:
+                return Hold()
+            return Target(self._weight if edge > 0 else -self._weight, **barrier)
         return Flat() if self._flat_on_no_signal else Hold()

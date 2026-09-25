@@ -99,8 +99,9 @@ class InstrumentRegistry:
             try:
                 raw = json.loads(self._path.read_text())
             except (OSError, ValueError):
-                log.warning("could not read instrument registry at %s; treating it as empty",
-                            self._path)
+                log.warning(
+                    "could not read instrument registry at %s; treating it as empty", self._path
+                )
                 raw = {}
             for key, value in (raw or {}).items():
                 if isinstance(value, dict):

@@ -222,7 +222,7 @@ export interface TrainingSpec {
   subsample?: number;
   colsample_bytree?: number;
   // shared
-  lr?: number;
+  lr?: number | null;
   use_sample_weights?: boolean;
   seed?: number;
 }

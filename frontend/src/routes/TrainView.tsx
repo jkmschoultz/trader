@@ -212,7 +212,7 @@ export function TrainView() {
   const [subsample, setSubsample] = useState("0.8");
   const [colsampleBytree, setColsampleBytree] = useState("0.8");
   // shared
-  const [lr, setLr] = useState("0.001");
+  const [lr, setLr] = useState("");
   const [seed, setSeed] = useState("0");
   const [sampleWeights, setSampleWeights] = useState(false);
 
@@ -247,7 +247,7 @@ export function TrainView() {
       train_end: trainEnd,
       val_end: valEnd,
       since: since || null,
-      lr: num(lr),
+      lr: numOrNull(lr),
       seed: num(seed),
       use_sample_weights: sampleWeights,
       ...(isGbm
@@ -534,6 +534,7 @@ export function TrainView() {
                 <input
                   className={`${field} w-full`}
                   value={lr}
+                  placeholder={modelType === "lstm" ? "0.001" : "0.05"}
                   onChange={(e) => setLr(e.target.value)}
                 />
               </div>

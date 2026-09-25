@@ -198,6 +198,9 @@ class ModelRegistry:
             "max_bars": label.max_bars,
             "min_return": label.min_return,
         }
+        # only when set, so fraction-barrier models keep their ids and manifests
+        if getattr(label, "scale", "fraction") != "fraction":
+            barriers["scale"] = label.scale
         split_dict = {
             "train_end": split.train_end.isoformat(),
             "val_end": split.val_end.isoformat(),

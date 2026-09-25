@@ -87,6 +87,22 @@ def test_resolved_workers_caps_at_configs_and_cpu():
     assert spec.model_copy(update={"max_workers": 2}).resolved_workers(3) == 2
 
 
+def test_auto_workers_leave_room_in_ram(monkeypatch):
+    """Four 8 GB workers once ran a 32 GB box out of memory: auto must budget RAM."""
+    from trader.service import tuning
+
+    spec = _spec({"threshold": [0.0, 0.3]}).model_copy(update={"max_workers": 0})
+    monkeypatch.setattr(tuning.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(tuning, "_available_ram_gb", lambda: 24.0)
+    assert spec.resolved_workers(6) == 2
+    monkeypatch.setattr(tuning, "_available_ram_gb", lambda: 4.0)
+    assert spec.resolved_workers(6) == 1  # never zero
+    monkeypatch.setattr(tuning, "_available_ram_gb", lambda: None)
+    assert spec.resolved_workers(6) == 4
+    # an explicit --workers is the user's call
+    assert spec.model_copy(update={"max_workers": 3}).resolved_workers(6) == 3
+
+
 async def test_sweep_runs_across_processes(cv_settings):
     """max_workers=2 fans the configs out to a process pool and still ranks them."""
     spec = _spec({"threshold": [0.0, 0.3]}).model_copy(update={"max_workers": 2})

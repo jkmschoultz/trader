@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -32,6 +32,7 @@ class LabelSpec(BaseModel):
     take: float | None = Field(default=0.01, gt=0)
     max_bars: int = Field(default=24, ge=1)
     min_return: float = Field(default=0.0, ge=0)
+    barrier_scale: Literal["fraction", "atr"] = "fraction"
 
     @field_validator("horizon", mode="before")
     @classmethod
@@ -118,6 +119,7 @@ async def run_labelling(
             take=spec.take,
             max_bars=spec.max_bars,
             min_return=spec.min_return,
+            scale=spec.barrier_scale,
         )
         per_symbol[item.label] = {"key": str(item.key), **_summarise(events)}
         frames.append(events.dropna(subset=["label"]))
@@ -127,7 +129,12 @@ async def run_labelling(
     combined = pd.concat(frames) if frames else _empty_events()
     return {
         **_summarise(combined),
-        "barriers": {"stop": spec.stop, "take": spec.take, "max_bars": spec.max_bars},
+        "barriers": {
+            "stop": spec.stop,
+            "take": spec.take,
+            "max_bars": spec.max_bars,
+            "scale": spec.barrier_scale,
+        },
         "per_symbol": per_symbol,
     }
 

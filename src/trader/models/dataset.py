@@ -204,6 +204,7 @@ def _triple_barrier_from(bars: pd.DataFrame, label: LabelConfig) -> pd.DataFrame
         max_bars=label.max_bars,
         min_return=label.min_return,
         entry=label.entry,
+        scale=label.scale,
     )
 
 
