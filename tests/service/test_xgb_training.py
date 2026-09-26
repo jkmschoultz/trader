@@ -102,3 +102,20 @@ def test_a_tree_sweep_does_not_inherit_the_lstm_learning_rate():
     spec = TuningSpec(strategy="xgb", base=base, cv=cv, grid={"num_leaves": [7, 15]})
     train, _ = spec.specs_for({"num_leaves": 7})
     assert train.learning_rate == 0.05
+
+
+async def test_primary_trains_only_on_gated_bars_and_records_it(tmp_path, seed_trainable_lake):
+    import json
+
+    seed_trainable_lake(tmp_path, bars=4000)
+    settings = Settings(data_dir=tmp_path, state_dir=tmp_path / "state")
+    dates = dict(train_end="2024-01-10", val_end="2024-01-15")  # gate on 8th and 14th
+    plain = await run_training(settings, _spec(**dates))
+    gated = await run_training(
+        settings, _spec(primary="tsmom", primary_lookbacks="1/2", name="gated", **dates)
+    )
+
+    assert 0 < gated["report"]["n_train"] < plain["report"]["n_train"]
+    manifest = json.loads((settings.models_dir / gated["model_id"] / "manifest.json").read_text())
+    assert manifest["primary"] == {"name": "tsmom", "lookbacks": [1, 2]}
+    assert gated["model_id"].split("-")[-1] != plain["model_id"].split("-")[-1]

@@ -98,6 +98,15 @@ class ModelStrategy(InstrumentStrategy):
         self._barrier = target_from_barrier_params(self._info.barriers) if bracket else {}
         # "atr": the stored stop / take are ATR multiples, converted per decision
         self._barrier_scale = self._info.barriers.get("scale", "fraction")
+        # meta-labelling: trade only while the primary rule the model was trained
+        # under is long; the gate is re-read once per completed day
+        from trader.labels.primary import LiveGate, PrimarySpec
+
+        self._primary = (
+            LiveGate(PrimarySpec.from_dict(self._info.primary)) if self._info.primary else None
+        )
+        if self._primary is not None:
+            self.history_days = self._primary.spec.span_days
         # label -> (bar times as int64 ns, feature rows); see use_precomputed
         self._precomputed: dict[str, tuple] = {}
 
@@ -187,6 +196,8 @@ class ModelStrategy(InstrumentStrategy):
 
         if ctx.bars_seen < self.warmup:
             return Hold()
+        if self._primary is not None and not self._primary(ctx.history, ctx.horizon, ctx.label):
+            return Flat()
 
         window = self._window_rows(ctx)
         if window.shape[0] < self._window or np.isnan(window).any():
@@ -200,6 +211,8 @@ class ModelStrategy(InstrumentStrategy):
         probs = np.asarray(self._predict_proba(np.ascontiguousarray(x)), dtype=float).reshape(-1)
         edge = float(probs[2] - probs[0])  # p(up) - p(down)
         if abs(edge) > self._threshold:
+            if edge < 0 and self._primary is not None:
+                return Flat()  # the primary is long-only: a "down" call means stay out
             barrier = self._bracket(ctx)
             if barrier is None:
                 return Hold()

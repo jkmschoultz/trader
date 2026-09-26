@@ -171,3 +171,20 @@ def test_describe_summarises_a_series():
 
 def test_describe_of_an_empty_frame_reports_no_rows():
     assert describe(empty_frame(), 1) == {"rows": 0}
+
+
+def test_a_series_restarts_after_its_last_untradable_gap():
+    import pandas as pd
+
+    from trader.data.bars import after_last_long_gap
+
+    times = list(pd.date_range("2020-01-01", periods=10, freq="D", tz="UTC"))
+    times += list(pd.date_range("2022-06-01", periods=5, freq="D", tz="UTC"))  # relisted
+    frame = pd.DataFrame({"time": times, "close": range(15)})
+    kept, cut = after_last_long_gap(frame)
+    assert cut == pd.Timestamp("2022-06-01", tz="UTC")
+    assert kept["close"].tolist() == [10, 11, 12, 13, 14]
+
+    weekends_only = frame.iloc[:10]
+    same, cut = after_last_long_gap(weekends_only)
+    assert cut is None and len(same) == 10

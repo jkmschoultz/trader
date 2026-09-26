@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -74,3 +75,40 @@ def test_empty_trades_give_zeroed_trade_stats():
     assert metrics.n_trades == 0
     assert metrics.hit_rate == 0.0
     assert metrics.profit_factor == 0.0
+
+
+# --- annualisation from the calendar --------------------------------------------
+
+
+def _daily_curve(days_per_week: int, years: float, growth: float) -> pd.Series:
+    """Equity compounding smoothly to ``growth`` over ``years`` of daily bars."""
+    all_days = pd.date_range("2020-01-01", periods=int(round(365.25 * years)) + 1, tz="UTC")
+    times = all_days[all_days.dayofweek < days_per_week]
+    n = len(times)
+    rng = np.random.default_rng(0)
+    steps = np.log(growth) / (n - 1) + rng.normal(0, 0.01, n - 1)
+    steps -= steps.mean() - np.log(growth) / (n - 1)  # exact total growth
+    return pd.Series(100.0 * np.exp(np.r_[0.0, np.cumsum(steps)]), index=times)
+
+
+@pytest.mark.parametrize("days_per_week", [7, 5])  # crypto trades weekends, FX does not
+def test_cagr_uses_calendar_years_whatever_the_bar_count(days_per_week):
+    curve = _daily_curve(days_per_week, years=4.0, growth=4.0)
+    m = compute(curve, pd.DataFrame(), periods_per_year=252)  # 252 is wrong for 7-day
+    assert m.cagr == pytest.approx(4.0 ** (1 / 4.0) - 1, rel=2e-3)
+
+
+def test_sharpe_scales_by_observed_bars_per_year():
+    curve = _daily_curve(7, years=4.0, growth=2.0)
+    rets = curve.pct_change().dropna()
+    m = compute(curve, pd.DataFrame(), periods_per_year=252)
+    per_year = len(rets) / 4.0  # ~365
+    assert m.sharpe == pytest.approx(rets.mean() / rets.std() * np.sqrt(per_year), rel=2e-3)
+    assert m.ann_vol == pytest.approx(rets.std() * np.sqrt(per_year), rel=2e-3)
+
+
+def test_short_runs_keep_the_assumed_periods_per_year():
+    curve = _daily_curve(7, years=0.1, growth=1.05)
+    rets = curve.pct_change().dropna()
+    m = compute(curve, pd.DataFrame(), periods_per_year=252)
+    assert m.ann_vol == pytest.approx(rets.std() * np.sqrt(252))

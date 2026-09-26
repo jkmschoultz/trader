@@ -79,8 +79,13 @@ fill against the trade (a buy fills higher, a sell lower):
 
 `periods_per_year` is derived from the horizon and, when an inferred session
 calendar is available, the session length: a 6.5-hour equity session at
-5-minute bars is 78 bars/day, not `1440 / 5`. The trading year is assumed to be
-**252 days**. Ratios use a zero risk-free rate and sample standard deviation.
+5-minute bars is 78 bars/day, not `1440 / 5`, over an assumed **252-day** year.
+That assumption only applies to runs shorter than ~90 days. Longer runs take
+time from the equity curve's timestamps: CAGR uses the calendar span, and
+Sharpe / volatility use the observed bars per calendar year. A 252-day year is
+wrong for 24/7 crypto, which has 365 daily bars a year; it made crypto CAGR and
+Sharpe read ~20% low. Ratios use a zero risk-free rate and sample standard
+deviation.
 
 CAGR is only reported once the run spans at least a week of bars — annualising a
 return measured over a few days produces a number with no meaning.

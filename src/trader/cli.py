@@ -374,6 +374,36 @@ async def _cmd_data_backfill(settings: Settings, args) -> int:
     return 0
 
 
+def _cmd_data_crypto(settings: Settings, args) -> int:
+    """Import Coinbase candles (no Saxo login needed) into the lake as asset type Crypto."""
+    _, _, _, _, lake_mod = _require_data_extra()
+    import httpx  # noqa: PLC0415
+
+    from trader.data import coinbase  # noqa: PLC0415
+    from trader.data.instruments import InstrumentRegistry  # noqa: PLC0415
+
+    store = lake_mod.BarLake(settings.data_dir)
+    registry = InstrumentRegistry(settings.data_dir)
+    since = _parse_since(args.since)
+    for product in args.products:
+        for horizon in (parse_horizon(h) for h in args.horizon.split(",")):
+            try:
+                result = coinbase.import_product(
+                    store, product, horizon, since=since, registry=registry
+                )
+            except ValueError as exc:
+                raise UsageError(str(exc)) from exc
+            except httpx.HTTPStatusError as exc:
+                print(f"{product}: Coinbase answered {exc.response.status_code}; skipped")
+                continue
+            key = lake_mod.SeriesKey(coinbase.ASSET_TYPE, coinbase.pseudo_uic(product), horizon)
+            coverage = store.coverage(key)
+            print(f"+{result.rows_added:,} new")
+            if coverage:
+                print(lake_mod.coverage_line(coverage, product.upper()))
+    return 0
+
+
 def _cmd_data_coverage(settings: Settings, args) -> int:
     _, _, _, _, lake_mod = _require_data_extra()
     from trader.data.instruments import InstrumentRegistry  # noqa: PLC0415
@@ -504,12 +534,13 @@ async def _cmd_backtest(settings: Settings, args) -> int:
         spec = BacktestSpec(
             symbols=args.symbol,
             uics=args.uic,
-            asset_type=args.asset_type,
+            asset_type=_asset_types(args.asset_type),
             strategy=args.strategy,
             params=_parse_params(args.param),
             horizon=args.horizon,
             since=args.since,
             allocator=args.allocator,
+            allocator_params=_parse_params(args.allocator_param),
             fee_bps=args.fee_bps,
             spread_bps=args.spread_bps,
             slippage_bps=args.slippage_bps,
@@ -686,6 +717,8 @@ async def _cmd_train(settings: Settings, args) -> int:
             max_bars=args.max_bars,
             min_return=args.min_return,
             barrier_scale=args.barrier_scale,
+            primary=args.primary,
+            primary_lookbacks=args.primary_lookbacks,
             window=args.window,
             train_end=args.train_end,
             val_end=args.val_end,
@@ -804,7 +837,7 @@ async def _cmd_tune(settings: Settings, args) -> int:
             base=dict(
                 symbols=args.symbol,
                 uics=args.uic,
-                asset_type=args.asset_type,
+                asset_type=_asset_types(args.asset_type),
                 exchange=args.exchange,
                 name=args.name,
                 model_type=args.model_type,
@@ -816,6 +849,8 @@ async def _cmd_tune(settings: Settings, args) -> int:
                 max_bars=args.max_bars,
                 min_return=args.min_return,
                 barrier_scale=args.barrier_scale,
+                primary=args.primary,
+                primary_lookbacks=args.primary_lookbacks,
                 window=args.window,
                 embargo_bars=args.embargo_bars,
                 since=args.since,
@@ -847,9 +882,11 @@ async def _cmd_tune(settings: Settings, args) -> int:
                 spread_bps=args.spread_bps,
                 slippage_bps=args.slippage_bps,
                 allocator=args.allocator,
+                allocator_params=_parse_params(args.allocator_param),
                 leverage=args.leverage,
                 threshold=args.threshold,
                 on_no_signal=args.on_no_signal,
+                bracket=not args.no_bracket,
             ),
             grid=_parse_grid(args.grid),
             top_k=args.top,
@@ -970,6 +1007,13 @@ def _parse_since(value: str | None) -> datetime | None:
         raise UsageError(f"--since: {exc}") from exc
 
 
+def _asset_types(values: list[str] | None) -> str | list[str] | None:
+    """A repeatable ``--asset-type``: one value applies to all symbols, several pair up."""
+    if not values:
+        return None
+    return values[0] if len(values) == 1 else values
+
+
 def _parse_params(items: list[str]) -> dict[str, object]:
     """Turn ``["fast=10", "long_only=true"]`` into a coerced kwargs dict."""
     from trader.service.inputs import parse_params  # noqa: PLC0415
@@ -1055,6 +1099,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     data_sub.add_parser("coverage", help="what the lake currently holds")
 
+    crypto_p = data_sub.add_parser(
+        "crypto", help="import Coinbase spot candles (e.g. BTC-USD) as asset type Crypto"
+    )
+    crypto_p.add_argument("products", nargs="+", metavar="PRODUCT", help="e.g. BTC-USD ETH-USD")
+    crypto_p.add_argument("--horizon", default="1d", help="comma-separated: 1m,5m,15m,1h,6h,1d")
+    crypto_p.add_argument(
+        "--since", help="YYYY-MM-DD, 90d, 2y, or 'all' (default: resume, or full history)"
+    )
+
     symbols_p = data_sub.add_parser("symbols", help="fetch Saxo symbols for every uic in the lake")
     symbols_p.add_argument(
         "--refresh",
@@ -1083,7 +1136,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="skip symbol resolution; pairs positionally with --symbol",
     )
-    backtest_p.add_argument("--asset-type", help="asset type for every --symbol (default Stock)")
+    backtest_p.add_argument(
+        "--asset-type",
+        action="append",
+        help="asset type (default Stock): once for every --symbol, or repeat to pair positionally",
+    )
     backtest_p.add_argument("--strategy", required=True, help="registered strategy name")
     backtest_p.add_argument(
         "--param",
@@ -1098,6 +1155,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--allocator",
         default="equal-weight",
         help="equal-weight | passthrough | fixed-fraction | vol-target",
+    )
+    backtest_p.add_argument(
+        "--allocator-param",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="allocator setting, e.g. --allocator-param target_ann_vol=0.3; repeatable",
     )
     backtest_p.add_argument("--starting-cash", type=float, default=100_000.0)
     backtest_p.add_argument(
@@ -1167,6 +1231,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default="fraction",
         help="stop/take units: price fractions (0.01 = 1%%) or multiples of ATR",
     )
+    train_p.add_argument(
+        "--primary",
+        choices=("tsmom",),
+        help="meta-labelling: learn from and trade only bars where daily momentum is long",
+    )
+    train_p.add_argument(
+        "--primary-lookbacks", default="21/63/126/252", help="primary lookbacks in days"
+    )
     train_p.add_argument("--window", type=int, default=32, help="sequence length in bars")
     train_p.add_argument("--train-end", required=True, help="train/val boundary date")
     train_p.add_argument("--val-end", required=True, help="val/test boundary date")
@@ -1193,7 +1265,9 @@ def _build_parser() -> argparse.ArgumentParser:
     tune_p = sub.add_parser("tune", help="walk-forward grid sweep over a strategy's knobs")
     tune_p.add_argument("--symbol", action="append", required=True, metavar="SYMBOL")
     tune_p.add_argument("--uic", action="append", type=int, default=[])
-    tune_p.add_argument("--asset-type")
+    tune_p.add_argument(
+        "--asset-type", action="append", help="once for all symbols, or one per --symbol"
+    )
     tune_p.add_argument("--exchange")
     tune_p.add_argument("--name", default="lstm", help="registry name prefix")
     tune_p.add_argument(
@@ -1227,6 +1301,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default="fraction",
         help="stop/take units: price fractions (0.01 = 1%%) or multiples of ATR",
     )
+    tune_p.add_argument(
+        "--primary",
+        choices=("tsmom",),
+        help="meta-labelling: learn from and trade only bars where daily momentum is long",
+    )
+    tune_p.add_argument(
+        "--primary-lookbacks", default="21/63/126/252", help="primary lookbacks in days"
+    )
     tune_p.add_argument("--window", type=int, default=32)
     tune_p.add_argument("--embargo-bars", type=int, help="default window + max_bars")
     tune_p.add_argument("--since", help="YYYY-MM-DD, an ISO timestamp, 90d, 2y, or 'all'")
@@ -1255,9 +1337,21 @@ def _build_parser() -> argparse.ArgumentParser:
     tune_p.add_argument("--spread-bps", type=float, default=0.0)
     tune_p.add_argument("--slippage-bps", type=float, default=0.0)
     tune_p.add_argument("--allocator", default="equal-weight")
+    tune_p.add_argument(
+        "--allocator-param",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="allocator setting, e.g. --allocator-param target_ann_vol=0.3; repeatable",
+    )
     tune_p.add_argument("--leverage", type=float, default=1.0)
     tune_p.add_argument("--threshold", type=float, default=0.15)
     tune_p.add_argument("--on-no-signal", choices=("hold", "flat"), default="hold")
+    tune_p.add_argument(
+        "--no-bracket",
+        action="store_true",
+        help="model sweeps: hold until the signal changes instead of using the trained exits",
+    )
     tune_p.add_argument(
         "--grid",
         action="append",
@@ -1321,6 +1415,8 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_cmd_data_backfill(settings, args))
             if args.data_command == "coverage":
                 return _cmd_data_coverage(settings, args)
+            if args.data_command == "crypto":
+                return _cmd_data_crypto(settings, args)
             if args.data_command == "symbols":
                 return asyncio.run(_cmd_data_symbols(settings, args))
             if args.data_command == "sessions":

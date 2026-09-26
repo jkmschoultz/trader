@@ -31,7 +31,8 @@ class TrainingSpec(BaseModel):
 
     symbols: list[str] = Field(min_length=1)
     uics: list[int] = Field(default_factory=list)
-    asset_type: str | None = None
+    #: one for every symbol, or one per symbol (a mixed basket)
+    asset_type: str | list[str] | None = None
     exchange: str | None = None
     name: str = "lstm"
     #: which model family to train: ``"lstm"`` (torch sequence), ``"gbm"``
@@ -51,6 +52,11 @@ class TrainingSpec(BaseModel):
     #: ``"fraction"``: stop / take are price fractions (0.01 = 1%). ``"atr"``:
     #: multiples of the decision bar's ATR, so barriers widen with volatility.
     barrier_scale: Literal["fraction", "atr"] = "fraction"
+    #: meta-labelling: learn from, and trade on, only the bars where this simple
+    #: rule is long (see :mod:`trader.labels.primary`). None = every bar.
+    primary: Literal["tsmom"] | None = None
+    #: the primary's lookbacks in days, ``"21/63/126/252"`` style
+    primary_lookbacks: str = "21/63/126/252"
 
     window: int = Field(default=32, ge=2)
     # Required for a single train (:func:`run_training`); ignored by
@@ -84,6 +90,13 @@ class TrainingSpec(BaseModel):
     #: device for the LSTM (torch) and the XGBoost trees: ``"auto"`` picks CUDA
     #: when available, else CPU. The LightGBM ``gbm`` ignores it.
     device: str = "auto"
+
+    @property
+    def primary_spec(self):
+        """The :class:`~trader.labels.primary.PrimarySpec`, or None without a primary."""
+        from trader.labels.primary import PrimarySpec
+
+        return PrimarySpec.parse(self.primary, self.primary_lookbacks) if self.primary else None
 
     @property
     def learning_rate(self) -> float:
@@ -151,9 +164,15 @@ class CVConfig(BaseModel):
     spread_bps: float = Field(default=0.0, ge=0)
     slippage_bps: float = Field(default=0.0, ge=0)
     allocator: str = "equal-weight"
+    #: keyword arguments for the allocator, e.g. ``{"target_ann_vol": 0.3}``
+    allocator_params: dict[str, Any] = Field(default_factory=dict)
     leverage: float = Field(default=1.0, gt=0)
     threshold: float = Field(default=0.15, ge=0, lt=1)
     on_no_signal: Literal["hold", "flat"] = "hold"
+    #: attach the trained stop / take / max_bars to each entry. False holds each
+    #: position until the signal changes -- the labels' barriers still define
+    #: the question the model learned, but the trade is not cut short by them.
+    bracket: bool = True
 
 
 async def run_training(
@@ -210,6 +229,7 @@ async def run_training(
         report=train_report,
         model_type=spec.model_type,
         layout=spec.layout,
+        primary=spec.primary_spec.to_dict() if spec.primary_spec else None,
         data_spec={
             "symbols": spec.symbols,
             "uics": spec.uics,
@@ -271,7 +291,7 @@ async def run_cv(
     embargo = spec.embargo_bars if spec.embargo_bars is not None else spec.window + spec.max_bars
     try:
         splits = walk_forward_splits(
-            merged.t,
+            _split_times(merged, series, spec),
             n_folds=cv.folds,
             train_days=cv.train_days,
             val_days=cv.val_days,
@@ -284,9 +304,11 @@ async def run_cv(
         raise InvalidRequest(str(exc)) from exc
 
     try:
-        allocator = bt.get_allocator(cv.allocator)
+        allocator = bt.get_allocator(cv.allocator, **cv.allocator_params)
     except KeyError as exc:
         raise InvalidRequest(exc.args[0]) from exc
+    except (TypeError, ValueError) as exc:
+        raise InvalidRequest(f"bad allocator params for {cv.allocator!r}: {exc}") from exc
     cost_model = bt.CostModel(
         commission_bps=cv.fee_bps, half_spread_bps=cv.spread_bps, slippage_bps=cv.slippage_bps
     )
@@ -335,11 +357,13 @@ async def run_cv(
                 model_type=spec.model_type,
                 layout=spec.layout,
                 data_spec={"symbols": spec.symbols, "horizon": spec.horizon},
+                primary=spec.primary_spec.to_dict() if spec.primary_spec else None,
             )
             strategy = get_strategy(spec.model_type)(
                 model=info.id,
                 threshold=cv.threshold,
                 on_no_signal=cv.on_no_signal,
+                bracket=cv.bracket,
                 models_dir=str(tmp),
             )
             strategy.use_precomputed(precomputed)
@@ -376,10 +400,18 @@ async def run_cv(
 
 
 def _fold_lookback(spec: TrainingSpec, warmup: int):
-    """Wall-clock span of bars a fold backtest needs before its first decision."""
+    """Wall-clock span of bars a fold backtest needs before its first decision.
+
+    A primary rule reads a year of daily closes, far more than the model's own
+    warmup; without that history it would read "not long" for most of a fold.
+    """
     import pandas as pd
 
-    return pd.Timedelta(minutes=spec.horizon * (warmup + spec.max_bars + 64))
+    span = pd.Timedelta(minutes=spec.horizon * (warmup + spec.max_bars + 64))
+    if spec.primary_spec is not None:
+        # x1.5: daily bars skip weekends on most markets
+        span = max(span, pd.Timedelta(days=spec.primary_spec.span_days * 1.5))
+    return span
 
 
 async def _build_dataset(settings: Settings, spec: TrainingSpec):
@@ -435,11 +467,14 @@ async def _build_dataset(settings: Settings, spec: TrainingSpec):
     for item in series:
         weights = _sample_weights(item.frame, label) if spec.use_sample_weights else None
         try:
-            bundles.append(
-                build_bundle(item.frame, spec=window_spec, session=item.session, weights=weights)
+            bundle = build_bundle(
+                item.frame, spec=window_spec, session=item.session, weights=weights
             )
         except ValueError as exc:
             raise InvalidRequest(f"{item.label}: {exc}") from exc
+        if spec.primary_spec is not None:
+            bundle = _gate_bundle(bundle, item.frame, spec.horizon, spec.primary_spec)
+        bundles.append(bundle)
 
     merged = SequenceBundle(
         X=np.concatenate([b.X for b in bundles]),
@@ -579,6 +614,41 @@ def _add_skill(model, model_type: str, report, scaler, X, y, va, te) -> None:
                 float(f1_score(truth, pred, average="macro", labels=[0, 1, 2], zero_division=0)),
                 5,
             )
+
+
+def _split_times(merged, series, spec: TrainingSpec):
+    """The timeline walk-forward folds are laid over.
+
+    Normally the samples' own times. With a primary rule the samples start
+    wherever the rule first turns long, months after the data does; folds are
+    then laid over every bar instead, so they line up with a classical
+    strategy's folds (``run_strategy_cv``) over the same data and dates.
+    """
+    if spec.primary_spec is None:
+        return merged.t
+    from trader.service.evaluation import _decision_times
+
+    return _decision_times(series)
+
+
+def _gate_bundle(bundle, frame, horizon: int, primary):
+    """Keep only the samples whose decision bar has the primary rule long."""
+    import dataclasses
+
+    import numpy as np
+    import pandas as pd
+
+    from trader.labels.primary import primary_gate
+
+    gate = primary_gate(frame, horizon, primary)
+    frame_ns = pd.DatetimeIndex(frame["time"]).as_unit("ns").asi8
+    pos = np.searchsorted(frame_ns, bundle.t)
+    keep = gate[np.clip(pos, 0, len(gate) - 1)] & (
+        frame_ns[np.clip(pos, 0, len(gate) - 1)] == bundle.t
+    )
+    return dataclasses.replace(
+        bundle, X=bundle.X[keep], y=bundle.y[keep], w=bundle.w[keep], t=bundle.t[keep]
+    )
 
 
 def _sample_weights(frame, label):

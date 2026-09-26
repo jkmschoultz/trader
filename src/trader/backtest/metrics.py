@@ -5,7 +5,9 @@ Nothing here is annualisation-agnostic, so the caller must supply
 horizon. :func:`periods_per_year` derives it from the horizon and, when known,
 the instrument's session length, because a 5-minute bar over a 6.5-hour equity
 session is 78 bars/day, not ``1440 / 5``. The trading-year length is assumed to
-be 252 days.
+be 252 days -- but only for runs under ~90 days. Longer runs measure time from
+the equity curve's own timestamps (calendar years, and bars per calendar year),
+which is also right for 24/7 crypto, where 252 would undercount the year.
 
 Ratios use a zero risk-free rate and sample standard deviation (``ddof=1``).
 """
@@ -94,6 +96,17 @@ def periods_per_year(horizon: int, session_minutes: float | None = None) -> floa
     return bars_per_day * TRADING_DAYS_PER_YEAR
 
 
+#: runs shorter than this keep the assumed ``periods_per_year``
+_MIN_OBSERVED_YEARS = 90 / 365.25
+
+
+def _calendar_years(index: pd.Index) -> float | None:
+    """Wall-clock span of a datetime index in years, or None if it is not one."""
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+        return None
+    return (index[-1] - index[0]).total_seconds() / (365.25 * 86400)
+
+
 def _safe_div(num: float, den: float) -> float:
     return num / den if den else 0.0
 
@@ -121,6 +134,14 @@ def compute(
 
     total_return = _safe_div(end, start) - 1.0 if start else 0.0
     years = _safe_div(len(rets), periods_per_year)
+    # Over a long enough run, measure time from the timestamps: the calendar span
+    # gives the years, and bars per calendar year the annualisation. That is
+    # right for 24/7 crypto (365 daily bars a year), 5-day FX and exchange
+    # sessions alike, where the assumed 252-day year undercounts crypto.
+    span = _calendar_years(equity.index)
+    if span is not None and span >= _MIN_OBSERVED_YEARS and len(rets) > 1:
+        years = span
+        periods_per_year = len(rets) / span
     # Annualising a return measured over days rather than months explodes the
     # exponent into a meaningless number; report it only past a week of bars.
     if years >= 1.0 / 52.0 and start > 0 and end > 0:

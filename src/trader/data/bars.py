@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+import numpy as np
 import pandas as pd
 
 from trader.data.lake import BAR_COLUMNS, as_utc_timestamp, empty_frame, normalise
@@ -177,6 +178,32 @@ def clip(
     if end is not None:
         out = out[out["time"] <= as_utc_timestamp(end)]
     return out.reset_index(drop=True)
+
+
+#: a hole longer than this means the instrument could not be traded (a
+#: delisting and relisting, a data outage), not a weekend or a holiday
+MAX_TRADABLE_GAP = pd.Timedelta(days=30)
+
+
+def after_last_long_gap(frame: pd.DataFrame, max_gap: pd.Timedelta = MAX_TRADABLE_GAP):
+    """Keep only the bars after the last hole longer than ``max_gap``.
+
+    A position cannot be managed across a month with no prices: Coinbase
+    suspended XRP from 2021 to 2023, and a backtest holding through the hole
+    would book the whole relisting jump as if it had been tradable. So a
+    series restarts after its last such gap, and strategies warm up afresh.
+
+    Returns ``(frame, cut)``: ``cut`` is the first kept bar's time, or None when
+    nothing was dropped.
+    """
+    if len(frame) < 2:
+        return frame, None
+    gaps = frame["time"].diff()
+    long_gaps = np.flatnonzero((gaps > max_gap).to_numpy())
+    if not len(long_gaps):
+        return frame, None
+    start = int(long_gaps[-1])
+    return frame.iloc[start:].reset_index(drop=True), frame["time"].iloc[start]
 
 
 def describe(frame: pd.DataFrame, horizon: int) -> dict[str, object]:

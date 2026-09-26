@@ -38,6 +38,8 @@ class PanelSeries:
     frame: pd.DataFrame
     session: RegularHours | None
     exchange_id: str | None
+    #: the engine's sizing unit; fractional for crypto, 1 unit elsewhere
+    lot_size: float = 1.0
 
 
 async def load_panel(
@@ -45,7 +47,7 @@ async def load_panel(
     *,
     symbols: Sequence[str],
     uics: Sequence[int] = (),
-    asset_type: str | None = None,
+    asset_type: str | Sequence[str] | None = None,
     exchange: str | None = None,
     horizon: int,
     since: datetime | None = None,
@@ -72,6 +74,12 @@ async def load_panel(
 
     store = BarLake(settings.data_dir)
     padded_uics: list[int | None] = list(uics) + [None] * (len(symbols) - len(uics))
+    types = _per_symbol_types(asset_type, len(symbols))
+    # instruments from outside Saxo (Coinbase crypto) resolve from the local registry
+    padded_uics = [
+        uic if uic is not None else _local_uic(settings, symbol, atype)
+        for symbol, uic, atype in zip(symbols, padded_uics, types, strict=True)
+    ]
     need_network = any(uic is None for uic in padded_uics)
 
     out: list[PanelSeries] = []
@@ -80,6 +88,9 @@ async def load_panel(
         frame = store.read(key)
         if since is not None:
             frame = bars_mod.clip(frame, start=since)
+        frame, cut = bars_mod.after_last_long_gap(frame)
+        if cut is not None:
+            log.warning("%s: a gap of over 30 days; using bars from %s only", label, cut)
         if frame.empty:
             raise SeriesNotStored(
                 label,
@@ -90,7 +101,9 @@ async def load_panel(
             )
         return frame
 
-    async def _add(symbol: str, uic: int | None, client: SaxoClient | None) -> None:
+    async def _add(
+        symbol: str, uic: int | None, asset_type: str | None, client: SaxoClient | None
+    ) -> None:
         exchange_id: str | None = None
         if uic is None:
             assert client is not None  # need_network implies a client is open
@@ -116,14 +129,56 @@ async def load_panel(
             except SaxoAPIError as exc:
                 log.warning("no session calendar for %s: %s", label, exc)
 
-        out.append(PanelSeries(label, key, frame, session, exchange_id))
+        from trader.data import coinbase
+
+        lot = coinbase.LOT_SIZE if key.asset_type == coinbase.ASSET_TYPE else 1.0
+        out.append(PanelSeries(label, key, frame, session, exchange_id, lot))
 
     if need_network:
         async with SaxoClient(settings) as client:
-            for symbol, uic in zip(symbols, padded_uics, strict=True):
-                await _add(symbol, uic, client)
+            for symbol, uic, atype in zip(symbols, padded_uics, types, strict=True):
+                await _add(symbol, uic, atype, client)
     else:
-        for symbol, uic in zip(symbols, padded_uics, strict=True):
-            await _add(symbol, uic, None)
+        for symbol, uic, atype in zip(symbols, padded_uics, types, strict=True):
+            await _add(symbol, uic, atype, None)
 
     return out
+
+
+def _per_symbol_types(asset_type: str | Sequence[str] | None, n: int) -> list[str | None]:
+    """One asset type per symbol: a single value (or a one-item list) applies to all,
+    a list pairs positionally -- a mixed basket of ETFs, index CFDs, FX and crypto.
+    """
+    from trader.service.errors import InvalidRequest
+
+    if asset_type is None or isinstance(asset_type, str):
+        return [asset_type] * n
+    types = list(asset_type)
+    if len(types) == 1:
+        return types * n
+    if len(types) != n:
+        raise InvalidRequest(
+            f"{len(types)} asset types for {n} symbols; give one for all, or one per symbol"
+        )
+    return types
+
+
+def _local_uic(settings: Settings, symbol: str, asset_type: str | None) -> int | None:
+    """The pseudo-Uic of a non-Saxo instrument (asset type ``Crypto``), or None.
+
+    Saxo instruments still resolve over the network; this only answers for
+    asset types Saxo does not serve, recorded by their importer.
+    """
+    from trader.data.coinbase import ASSET_TYPE
+    from trader.data.instruments import InstrumentRegistry
+
+    if asset_type != ASSET_TYPE:
+        return None
+    for record in InstrumentRegistry(settings.data_dir):
+        if record.asset_type == ASSET_TYPE and record.symbol.upper() == symbol.upper():
+            return record.uic
+    from trader.service.errors import InvalidRequest
+
+    raise InvalidRequest(
+        f"{symbol} is not in the lake; import it with: trader data crypto {symbol}"
+    )

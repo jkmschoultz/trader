@@ -223,6 +223,11 @@ class Strategy(ABC):  # noqa: B024 - the two subclasses add the abstract on_bar
     #: engine will not call the strategy until this many closed bars exist.
     warmup: int = 0
 
+    #: Calendar days of history the strategy reads beyond ``warmup`` bars -- e.g.
+    #: a daily-momentum gate on intraday bars needs a year of days, far more
+    #: than any bar count says. Walk-forward folds give every fold this much.
+    history_days: int = 0
+
     #: Registry name, set by :func:`trader.strategies.registry.register`.
     name: str = ""
 

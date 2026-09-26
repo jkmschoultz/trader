@@ -84,6 +84,8 @@ class ModelInfo:
     class_distribution: dict[str, Any]
     symbols: list[str]
     asset_type: str | None
+    #: meta-labelling primary rule (``PrimarySpec.to_dict()``), or None
+    primary: dict[str, Any] | None = None
 
     @classmethod
     def from_manifest(cls, manifest: dict) -> ModelInfo:
@@ -106,6 +108,7 @@ class ModelInfo:
             class_distribution=dict(manifest.get("class_distribution", {})),
             symbols=list(data.get("symbols", [])),
             asset_type=data.get("asset_type"),
+            primary=manifest.get("primary"),
         )
 
 
@@ -175,6 +178,7 @@ class ModelRegistry:
         optimiser: dict | None = None,
         model_type: str = "lstm",
         layout: str = "sequence",
+        primary: dict | None = None,
     ) -> ModelInfo:
         """Write a model directory atomically and return its :class:`ModelInfo`.
 
@@ -209,9 +213,17 @@ class ModelRegistry:
             "train_start": split.train_start.isoformat() if split.train_start else None,
         }
         created_at = datetime.now(UTC).isoformat()
-        digest = _digest(
-            model_type, feature_spec.digest(), barriers, window, hyperparameters, split_dict
-        )
+        id_parts = [
+            model_type,
+            feature_spec.digest(),
+            barriers,
+            window,
+            hyperparameters,
+            split_dict,
+        ]
+        if primary:  # only when set, so other models keep their ids
+            id_parts.append(primary)
+        digest = _digest(*id_parts)
         model_id = f"{name}-{datetime.now(UTC):%Y%m%d-%H%M%S}-{digest[:8]}"
         weights_name = _WEIGHTS_FOR[model_type]
 
@@ -243,6 +255,7 @@ class ModelRegistry:
             "feature_digest": feature_spec.digest(),
             "window": int(window),
             "barriers": barriers,
+            **({"primary": primary} if primary else {}),
             "split": split_dict,
             "hyperparameters": hyperparameters,
             "metrics": report.metrics,

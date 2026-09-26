@@ -73,7 +73,7 @@ def score_fold(
         if len(clipped) <= strategy.warmup:
             continue
         panel[s.label] = clipped
-        instruments[s.label] = bt.Instrument(key=s.key, session=s.session)
+        instruments[s.label] = bt.Instrument(key=s.key, session=s.session, lot_size=s.lot_size)
     if not panel:
         raise InvalidRequest("fold window is shorter than the strategy warmup")
 
@@ -116,18 +116,24 @@ def aggregate_folds(fold_metrics: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def fold_lookback(horizon: int, warmup: int):
+def fold_lookback(horizon: int, warmup: int, history_days: int = 0):
     """Wall-clock span of bars a fold backtest needs before its first decision.
 
     ``horizon * (warmup + 64)`` bars, floored at a day so a session-relative
     strategy (``orb``) always sees at least one full session before ``val_end``.
+    Daily and longer bars skip weekends and holidays on most markets (252 bars
+    in 365 days), so their span is stretched by 1.5 -- otherwise a 252-day
+    lookback would still be warming up well into the test window.
     """
     import pandas as pd
 
-    return max(
-        pd.Timedelta(minutes=horizon * (warmup + 64)),
-        pd.Timedelta(days=1),
-    )
+    span = pd.Timedelta(minutes=horizon * (warmup + 64))
+    if horizon >= 1440:
+        span *= 1.5
+    # a strategy reading whole days (a momentum gate) needs them regardless of
+    # its bar warmup; x1.5 again for weekend-less markets
+    span = max(span, pd.Timedelta(days=history_days * 1.5))
+    return max(span, pd.Timedelta(days=1))
 
 
 class StrategyCVSpec(BaseModel):
@@ -140,7 +146,8 @@ class StrategyCVSpec(BaseModel):
 
     symbols: list[str] = Field(min_length=1)
     uics: list[int] = Field(default_factory=list)
-    asset_type: str | None = None
+    #: one for every symbol, or one per symbol (a mixed basket)
+    asset_type: str | list[str] | None = None
     exchange: str | None = None
     strategy: str
     params: dict[str, Any] = Field(default_factory=dict)
@@ -158,6 +165,8 @@ class StrategyCVSpec(BaseModel):
     spread_bps: float = Field(default=0.0, ge=0)
     slippage_bps: float = Field(default=0.0, ge=0)
     allocator: str = "equal-weight"
+    #: keyword arguments for the allocator, e.g. ``{"target_ann_vol": 0.3}``
+    allocator_params: dict[str, Any] = Field(default_factory=dict)
     leverage: float = Field(default=1.0, gt=0)
     starting_cash: float = 100_000.0
 
@@ -235,9 +244,11 @@ async def run_strategy_cv(
             raise InvalidRequest(f"bad params for strategy {spec.strategy!r}: {exc}") from exc
 
     try:
-        allocator = bt.get_allocator(spec.allocator)
+        allocator = bt.get_allocator(spec.allocator, **spec.allocator_params)
     except KeyError as exc:
         raise InvalidRequest(exc.args[0]) from exc
+    except (TypeError, ValueError) as exc:
+        raise InvalidRequest(f"bad allocator params for {spec.allocator!r}: {exc}") from exc
     cost_model = bt.CostModel(
         commission_bps=spec.fee_bps,
         half_spread_bps=spec.spread_bps,
@@ -278,7 +289,7 @@ async def run_strategy_cv(
             horizon=spec.horizon,
             val_end=split.val_end,
             test_end=split.test_end,
-            lookback=fold_lookback(spec.horizon, strategy.warmup),
+            lookback=fold_lookback(spec.horizon, strategy.warmup, strategy.history_days),
             allocator=allocator,
             cost_model=cost_model,
             leverage=spec.leverage,

@@ -143,3 +143,40 @@ def test_signals_carry_the_scaled_bracket(atr_model):
     decision = strat.on_bar(ctx)
     assert isinstance(decision, Target)
     assert decision.stop == pytest.approx(2.0 * unit[i], rel=1e-9)
+
+
+# --- meta-labelling primary -----------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def gated_model(atr_model, tmp_path_factory):
+    """The same trees, re-registered as trained under a 1/2-day momentum gate."""
+    from trader.models.registry import ModelRegistry
+
+    root, info, bars = atr_model
+    src = ModelRegistry(root)
+    predictor, scaler, _ = src.load_model(info.id)
+    import json
+
+    manifest = json.loads((src.path(info.id) / "manifest.json").read_text())
+    manifest["primary"] = {"name": "tsmom", "lookbacks": [1, 2]}
+    (src.path(info.id) / "manifest.json").write_text(json.dumps(manifest))
+    return root, info.id, bars
+
+
+def test_gated_model_is_flat_when_the_primary_is_off_and_never_short(gated_model):
+    from trader.labels.primary import PrimarySpec, primary_gate
+    from trader.strategies import get_strategy
+    from trader.strategies.base import Flat, Target
+
+    root, model_id, bars = gated_model
+    strat = get_strategy("gbm")(model=model_id, models_dir=root, threshold=0.0)
+    gate = primary_gate(bars, HORIZON, PrimarySpec(lookbacks=(1, 2)))
+    assert gate[400:].any() and not gate[400:].all()  # both states occur
+
+    for i in range(400, len(bars), 13):
+        decision = strat.on_bar(_ctx(bars, i))
+        if not gate[i]:
+            assert isinstance(decision, Flat), i
+        if isinstance(decision, Target):
+            assert decision.weight > 0, i  # long-only under a long-only primary

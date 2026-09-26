@@ -10,7 +10,15 @@ canonical bar frame (pandas), which comes with the ``[data]`` extra.
 
 from __future__ import annotations
 
-from trader.strategies import gbm, lstm, ma_cross, orb, xgb  # noqa: F401 - registration side effect
+from trader.strategies import (  # noqa: F401 - registration side effect
+    baseline,
+    gbm,
+    lstm,
+    ma_cross,
+    orb,
+    tsmom,
+    xgb,
+)
 from trader.strategies.base import (
     BarContext,
     Decision,

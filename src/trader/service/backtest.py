@@ -34,7 +34,8 @@ class BacktestSpec(BaseModel):
     symbols: list[str] = Field(min_length=1)
     strategy: str
     uics: list[int] = Field(default_factory=list)
-    asset_type: str | None = None
+    #: one for every symbol, or one per symbol (a mixed basket)
+    asset_type: str | list[str] | None = None
     # Preferred exchange suffix (e.g. "xnas") for resolving a bare ticker;
     # ignored when the symbol already names a venue or a uic is given.
     exchange: str | None = None
@@ -42,6 +43,8 @@ class BacktestSpec(BaseModel):
     horizon: int = 5
     since: datetime | None = None
     allocator: str = "equal-weight"
+    #: keyword arguments for the allocator, e.g. ``{"target_ann_vol": 0.3}``
+    allocator_params: dict[str, Any] = Field(default_factory=dict)
     fee_bps: float = 0.0
     spread_bps: float = 0.0
     slippage_bps: float = 0.0
@@ -113,9 +116,11 @@ async def run_backtest(
         raise InvalidRequest(f"bad params for strategy {spec.strategy!r}: {exc}") from exc
 
     try:
-        allocator = bt.get_allocator(spec.allocator)
+        allocator = bt.get_allocator(spec.allocator, **spec.allocator_params)
     except KeyError as exc:
         raise InvalidRequest(exc.args[0]) from exc
+    except (TypeError, ValueError) as exc:
+        raise InvalidRequest(f"bad allocator params for {spec.allocator!r}: {exc}") from exc
 
     series = await load_panel(
         settings,
@@ -128,7 +133,7 @@ async def run_backtest(
     )
     panel: dict[str, Any] = {s.label: s.frame for s in series}
     instruments: dict[str, Any] = {
-        s.label: bt.Instrument(key=s.key, session=s.session) for s in series
+        s.label: bt.Instrument(key=s.key, session=s.session, lot_size=s.lot_size) for s in series
     }
 
     return bt.run(

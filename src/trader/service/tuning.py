@@ -153,6 +153,7 @@ class TuningSpec(BaseModel):
             "spread_bps": self.cv.spread_bps,
             "slippage_bps": self.cv.slippage_bps,
             "allocator": self.cv.allocator,
+            "allocator_params": self.cv.allocator_params,
             "leverage": self.cv.leverage,
         }
         scoring.update({k: v for k, v in overrides.items() if k in _SCORING_FIELDS})

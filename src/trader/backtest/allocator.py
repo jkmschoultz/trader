@@ -86,13 +86,23 @@ class FixedFraction(Allocator):
 
 
 class VolTarget(Allocator):
-    """Weight each name inversely to its recent volatility, then scale to a target.
+    """Size each position so the whole book runs at roughly ``target_ann_vol``.
 
-    ``weight_i ∝ conviction_i / sigma_i``, where ``sigma_i`` is the annualised
-    standard deviation of the instrument's recent bar returns. The vector is
-    scaled so the equity-weighted portfolio volatility is roughly
-    ``target_ann_vol``, then capped. Names without enough history fall back to
-    an equal share.
+    ``weight_i = conviction_i * (target_ann_vol / sigma_i) / n_active``, where
+    ``sigma_i`` is the annualised standard deviation of the instrument's last
+    ``lookback`` bar returns. So a calm market gets a bigger position and a wild
+    one a smaller one, and a half-strength conviction gets half the size.
+    Splitting the target across the ``n_active`` names makes the book hit it
+    when they move together (BTC and ETH) and undershoot when they are
+    unrelated -- the cautious side.
+
+    Each weight is capped at ``max_weight`` (1.0 = no leverage in one name),
+    then gross exposure at the engine's leverage cap. Names without enough
+    history get an equal share.
+
+    ``periods_per_year=None`` counts bars per calendar year from the history's
+    own timestamps: 365 for daily crypto, ~260 for daily FX, and the right
+    number for intraday sessions.
     """
 
     def __init__(
@@ -100,36 +110,53 @@ class VolTarget(Allocator):
         target_ann_vol: float = 0.15,
         *,
         lookback: int = 20,
-        periods_per_year: float = 252.0,
+        periods_per_year: float | None = None,
+        max_weight: float = 1.0,
     ) -> None:
         if target_ann_vol <= 0:
             raise ValueError("target_ann_vol must be positive")
-        self.target_ann_vol = target_ann_vol
-        self.lookback = lookback
+        if lookback < 2:
+            raise ValueError("lookback must be at least 2 bars")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive")
+        self.target_ann_vol = float(target_ann_vol)
+        self.lookback = int(lookback)
         self.periods_per_year = periods_per_year
+        self.max_weight = float(max_weight)
 
     def _sigma(self, history: object) -> float | None:
         try:
             close = history["close"]  # type: ignore[index]
+            times = history["time"]  # type: ignore[index]
         except Exception:  # pragma: no cover - defensive
             return None
         if len(close) < self.lookback + 1:
             return None
-        rets = close.pct_change().dropna().iloc[-self.lookback :]
+        window = close.iloc[-self.lookback - 1 :]
+        rets = window.pct_change().dropna()
         sd = float(rets.std(ddof=1))
         if not sd or math.isnan(sd):
             return None
-        return sd * math.sqrt(self.periods_per_year)
+        per_year = self.periods_per_year
+        if per_year is None:
+            span = times.iloc[-1] - times.iloc[-self.lookback - 1]
+            years = span.total_seconds() / (365.25 * 86400)
+            if years <= 0:
+                return None
+            per_year = self.lookback / years
+        return sd * math.sqrt(per_year)
 
     def weights(self, convictions: Mapping[str, float], ctx: AllocatorContext) -> dict[str, float]:
-        raw: dict[str, float] = {}
-        for label, conviction in convictions.items():
-            if not conviction:
-                raw[label] = 0.0
-                continue
+        active = [label for label, c in convictions.items() if c]
+        raw: dict[str, float] = {label: 0.0 for label in convictions}
+        if not active:
+            return raw
+        share = 1.0 / len(active)
+        for label in active:
+            conviction = convictions[label]
             sigma = self._sigma(ctx.histories.get(label))
-            scale = (self.target_ann_vol / sigma) if sigma else 1.0
-            raw[label] = math.copysign(min(scale, 1.0), conviction)
+            size = (self.target_ann_vol / sigma) * abs(conviction) if sigma else 1.0
+            raw[label] = math.copysign(min(size * share, self.max_weight), conviction)
         return _cap(raw, ctx.leverage_cap)
 
 

@@ -237,7 +237,8 @@ async def refresh_symbols(
     todo = [
         (asset_type, uic)
         for asset_type, uic in pairs
-        if refresh or not registry.symbol_for(asset_type, uic)
+        # Crypto series come from Coinbase: their pseudo-Uics mean nothing to Saxo
+        if asset_type != "Crypto" and (refresh or not registry.symbol_for(asset_type, uic))
     ]
 
     if todo:
