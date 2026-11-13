@@ -30,3 +30,6 @@ frontend/dist/
 
 # Reports
 reports/
+
+# TypeScript incremental build info
+*.tsbuildinfo
