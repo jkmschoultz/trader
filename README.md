@@ -1,5 +1,7 @@
 # trader
 
+[![CI](https://github.com/jkmschoultz/trader/actions/workflows/ci.yml/badge.svg)](https://github.com/jkmschoultz/trader/actions/workflows/ci.yml)
+
 An intraday trading system on the Saxo Bank OpenAPI: research and backtesting, paper trading,
 live trading, and a UI to drive all of it. The modelling centrepiece is a multi-timeframe LSTM
 classifier trained on triple-barrier labels.
